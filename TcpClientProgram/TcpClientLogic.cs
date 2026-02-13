@@ -203,6 +203,17 @@ public class TcpClientLogic : IDisposable
             {
                 FinalizeCaptureAndExport();
             }
+
+            qty = snapshot.Count;
+            mysqlMessage = BuildRawMessage(snapshot);
+
+            incomingBuffer.Clear();
+        }
+
+        if (designForm.IsHandleCreated)
+        {
+            designForm.Invoke(new Action(() =>
+                designForm.DisplayMessage(string.Format("{0} Total read barcode QTY: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), qty))));
         }
         catch (Exception ex)
         {
