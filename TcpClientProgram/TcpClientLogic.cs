@@ -1,18 +1,16 @@
 ﻿using MySql.Data.MySqlClient;
 using System;
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 using TcpClientProgram;
 using Microsoft.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.IO;
 using NLog;
-using System.Reflection;
+using System.Collections.Generic;
 
 public class TcpClientLogic : IDisposable
 {
@@ -27,6 +25,7 @@ public class TcpClientLogic : IDisposable
     private string ip;
     private int port;
     private bool disposed = false;
+    private readonly object exportLock = new object();
 
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
@@ -59,7 +58,7 @@ public class TcpClientLogic : IDisposable
             designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Connected to reader ({ip}:{port})", System.Drawing.Color.Green)));
 
             cancellationTokenSource = new CancellationTokenSource();
-            await TaskEx.Run(() => ListenForMessages(cancellationTokenSource.Token));
+            await ListenForMessages(cancellationTokenSource.Token);
         }
         catch (Exception ex)
         {
@@ -67,13 +66,13 @@ public class TcpClientLogic : IDisposable
         }
     }
 
-    private async void ListenForMessages(CancellationToken cancellationToken)
+    private async Task ListenForMessages(CancellationToken cancellationToken)
     {
         isListening = true;
 
         try
         {
-            while (!cancellationToken.IsCancellationRequested && !IsCancellationTokenDisposed(cancellationToken) && !IsNetworkStreamDisposed(clientStream) && !designForm.disconnect)
+            while (!cancellationToken.IsCancellationRequested && clientStream != null && !designForm.disconnect)
             {
                 byte[] message = new byte[4096];
                 int bytesRead = await clientStream.ReadAsync(message, 0, 4096, cancellationToken);
@@ -107,19 +106,24 @@ public class TcpClientLogic : IDisposable
         finally
         {
             isListening = false;
-            clientStream.Close();
-            tcpClient.Close();
+            if (clientStream != null)
+            {
+                clientStream.Close();
+            }
+            if (tcpClient != null)
+            {
+                tcpClient.Close();
+            }
         }
     }
 
     public void SendMessage(string message)
     {
-    byte escapeCharacter = 27; // ASCII code for escape character
     byte carriageReturn = 13; // ASCII code for carriage return
 
     byte[] messageBytes = Encoding.ASCII.GetBytes($"{message}{(char)carriageReturn}");
 
-        if (clientStream.CanWrite)
+        if (clientStream != null && clientStream.CanWrite)
         {
             try
             {
@@ -134,9 +138,7 @@ public class TcpClientLogic : IDisposable
                     byte[] responseBytes = new byte[4096];
                     int responseBytesRead = clientStream.Read(responseBytes, 0, 4096);
                     string receivedResponse = Encoding.UTF8.GetString(responseBytes, 0, responseBytesRead);
-                    //qty = Regex.Matches(receivedResponse, "IMAGE").Count;
-                    qty = CountOccurrences(receivedResponse, "$")+1;
-                    //string pattern = @";A:\\IMAGE\\\d{3}_S_\d{2}\.JPG";
+                    qty = CountOccurrences(receivedResponse, "$");
                     string pattern = ";01";
                     mysqlMessage = receivedResponse;
                     //MessageBox.Show(receivedResponse);
@@ -145,6 +147,7 @@ public class TcpClientLogic : IDisposable
                     //designForm.Invoke(new Action(() => designForm.DisplayMessage($"\n{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Received response from server: \n{receivedResponse}")));
                     designForm.Invoke(new Action(() => designForm.DisplayMessage($"\n{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Received response from server: \n{Regex.Replace(receivedResponse.Replace('$','\n').Replace('$','\n'),pattern,"")}")));
                     designForm.Invoke(new Action(() => designForm.DisplayMessage($"\n{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Total read barcode QTY: {qty}")));
+                    ExportScanOutput(receivedResponse);
                 }
 
             }
@@ -165,13 +168,23 @@ public class TcpClientLogic : IDisposable
 
     public void StopClient()
     {
-        this.cancellationTokenSource.Dispose();
-        this.clientStream.Dispose();
+        if (this.cancellationTokenSource != null)
+        {
+            this.cancellationTokenSource.Cancel();
+            this.cancellationTokenSource.Dispose();
+        }
+        if (this.clientStream != null)
+        {
+            this.clientStream.Dispose();
+        }
         try
         {
             isListening = false;
             //cancellationTokenSource?.Cancel();
-            tcpClient.Close();
+            if (tcpClient != null)
+            {
+                tcpClient.Close();
+            }
         }
         catch(Exception ex)
         {
@@ -212,24 +225,20 @@ public class TcpClientLogic : IDisposable
 
     public void UploadToMysql(string message)
     {
-        char separator = ';';
-        char newLine = '$';
-        string[] rows = message.Split(newLine);
+        List<ReaderScanRecord> rows = ParseReaderResponse(message);
 
         try
         {
             using (dbConnection)
             {
-                foreach (string row in rows)
+                foreach (ReaderScanRecord row in rows)
                 {
-                    string[] values = row.Split(separator);
-                    string code = values[0];
-                    string image = values[1];
-
-                    string sql = $"INSERT INTO test values ('{code}','{image}',NOW())";
+                    string sql = "INSERT INTO test (code, image, created_at) VALUES (@code, @image, NOW())";
 
                     using (MySqlCommand cmd = new MySqlCommand(sql, dbConnection))
                     {
+                        cmd.Parameters.AddWithValue("@code", row.Code);
+                        cmd.Parameters.AddWithValue("@image", row.Image);
                         cmd.ExecuteNonQuery();
                     }
                 }
@@ -331,43 +340,152 @@ public class TcpClientLogic : IDisposable
         return count;
     }
 
-    private static bool IsCancellationTokenDisposed(CancellationToken token)
+    private void ExportScanOutput(string response)
     {
-        var ctsField = typeof(CancellationToken).GetField("m_source", BindingFlags.NonPublic | BindingFlags.Instance);
-        if (ctsField == null)
+        List<ReaderScanRecord> rows = ParseReaderResponse(response);
+        if (rows.Count == 0)
         {
-            throw new InvalidOperationException("CancellationToken does not have a 'm_source' field.");
+            return;
         }
 
-        var cts = ctsField.GetValue(token) as CancellationTokenSource;
-        if (cts == null)
-        {
-            throw new InvalidOperationException("Unable to retrieve the CancellationTokenSource.");
-        }
+        string exportFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "output");
+        string filePrefix = DateTime.Now.ToString("yyyyMMdd_HHmmss");
 
-        var disposedField = typeof(CancellationTokenSource).GetField("m_disposed", BindingFlags.NonPublic | BindingFlags.Instance);
-        if (disposedField == null)
+        lock (exportLock)
         {
-            throw new InvalidOperationException("CancellationTokenSource does not have a 'm_disposed' field.");
-        }
+            Directory.CreateDirectory(exportFolder);
 
-        return (bool)disposedField.GetValue(cts);
+            string txtPath = Path.Combine(exportFolder, filePrefix + ".txt");
+            string csvPath = Path.Combine(exportFolder, filePrefix + ".csv");
+            string jsonPath = Path.Combine(exportFolder, filePrefix + ".json");
+
+            File.WriteAllText(txtPath, response);
+            File.WriteAllLines(csvPath, BuildCsvLines(rows));
+            File.WriteAllText(jsonPath, BuildJson(rows));
+
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(
+                string.Format("{0} Exported scan output: {1}, {2}, {3}",
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                Path.GetFileName(txtPath),
+                Path.GetFileName(csvPath),
+                Path.GetFileName(jsonPath)),
+                System.Drawing.Color.DarkGreen)));
+        }
     }
 
-
-    private static bool IsNetworkStreamDisposed(NetworkStream networkStream)
+    private List<ReaderScanRecord> ParseReaderResponse(string response)
     {
-        if (networkStream == null) throw new ArgumentNullException(nameof(networkStream));
-
-        // Használjuk a Reflection-t az 'm_CleanedUp' mező ellenőrzésére
-        FieldInfo cleanedUpField = typeof(NetworkStream).GetField("m_CleanedUp", BindingFlags.NonPublic | BindingFlags.Instance);
-        if (cleanedUpField == null)
+        List<ReaderScanRecord> result = new List<ReaderScanRecord>();
+        if (string.IsNullOrWhiteSpace(response))
         {
-            // Ha nincs 'm_CleanedUp' mező, nem tudjuk ellenőrizni
-            throw new InvalidOperationException("NetworkStream does not have a 'm_CleanedUp' field.");
+            return result;
         }
 
-        return (bool)cleanedUpField.GetValue(networkStream);
+        string[] rows = response.Split(new[] { '$' }, StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (string rawRow in rows)
+        {
+            string row = rawRow.Trim();
+            if (string.IsNullOrEmpty(row))
+            {
+                continue;
+            }
+
+            string[] values = row.Split(';');
+            if (values.Length == 0)
+            {
+                continue;
+            }
+
+            string code = values[0].Trim();
+            string image = values.Length > 1 ? values[1].Trim() : string.Empty;
+            if (string.IsNullOrEmpty(code))
+            {
+                continue;
+            }
+
+            result.Add(new ReaderScanRecord
+            {
+                Code = code,
+                Image = image,
+                Timestamp = DateTime.Now
+            });
+        }
+
+        return result;
+    }
+
+    private IEnumerable<string> BuildCsvLines(IEnumerable<ReaderScanRecord> rows)
+    {
+        List<string> lines = new List<string>();
+        lines.Add("code;image;timestamp");
+
+        foreach (ReaderScanRecord row in rows)
+        {
+            lines.Add(string.Format("{0};{1};{2}",
+                EscapeCsvValue(row.Code),
+                EscapeCsvValue(row.Image),
+                row.Timestamp.ToString("o")));
+        }
+
+        return lines;
+    }
+
+    private string EscapeCsvValue(string value)
+    {
+        if (value == null)
+        {
+            return string.Empty;
+        }
+
+        if (value.Contains(";") || value.Contains("\"") || value.Contains("\n") || value.Contains("\r"))
+        {
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
+        }
+
+        return value;
+    }
+
+    private string BuildJson(IEnumerable<ReaderScanRecord> rows)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine("[");
+        bool first = true;
+
+        foreach (ReaderScanRecord row in rows)
+        {
+            if (!first)
+            {
+                sb.AppendLine(",");
+            }
+
+            sb.Append("  {\"code\":\"").Append(JsonEscape(row.Code))
+              .Append("\",\"image\":\"").Append(JsonEscape(row.Image))
+              .Append("\",\"timestamp\":\"").Append(row.Timestamp.ToString("o"))
+              .Append("\"}");
+            first = false;
+        }
+
+        sb.AppendLine();
+        sb.Append("]");
+        return sb.ToString();
+    }
+
+    private string JsonEscape(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+
+    private class ReaderScanRecord
+    {
+        public string Code { get; set; }
+        public string Image { get; set; }
+        public DateTime Timestamp { get; set; }
     }
 
     public void Dispose()
