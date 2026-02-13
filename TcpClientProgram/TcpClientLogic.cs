@@ -372,7 +372,7 @@ public class TcpClientLogic : IDisposable
 
         try
         {
-            const string sql = "INSERT INTO test (data, image) VALUES (@data, @image)";
+            const string sql = "INSERT INTO scans (data, image,processed) VALUES (@data, @image,0)";
             using (var cmd = new MySqlCommand(sql, dbConnection))
             {
                 var pData = cmd.Parameters.Add("@data", MySqlDbType.VarChar);
