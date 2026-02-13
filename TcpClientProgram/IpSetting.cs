@@ -24,7 +24,7 @@ namespace TcpClientProgram
 
         private void buttonSet_Click(object sender, EventArgs e)
         {
-            form.Ip = textBoxIp.Text;
+            form.Ip = textBoxPort.Text;
             form.Port = Int32.Parse(textBoxPort.Text);
             LineChanger($"ip={textBoxIp.Text}", "settings.ini", 5);
             LineChanger($"port={textBoxPort.Text}", "settings.ini", 6);

@@ -18,8 +18,7 @@ namespace TcpClientProgram
         {
             GetIp();
             InitializeComponent();
-            string targetIp = string.IsNullOrWhiteSpace(this.ip) ? "10.8.253.207" : this.ip;
-            this.webBrowser.Url = new System.Uri(string.Format("http://{0}", targetIp));
+            this.webBrowser.Url = new System.Uri("http://10.8.83.207" );
         }
 
         private void webBrowser_DocumentCompleted(object sender, WebBrowserDocumentCompletedEventArgs e)

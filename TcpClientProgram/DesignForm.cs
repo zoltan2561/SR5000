@@ -667,36 +667,8 @@ namespace TcpClientProgram
             login.ShowDialog();
         }
 
-        private void EnsureSettingsFileExists()
-        {
-            string settingsPath = "settings.ini";
-            if (File.Exists(settingsPath))
-            {
-                return;
-            }
-
-            string[] defaultSettings =
-            {
-                "mail=",
-                "timer=3000",
-                "scancount=1",
-                "reserved=",
-                "ip=10.8.253.207",
-                "port=9004",
-                "reserved2=",
-                "autoupload=0",
-                "reserved3=",
-                "blockcommand=0",
-                "language=hu"
-            };
-
-            File.WriteAllLines(settingsPath, defaultSettings);
-            DisplayMessage($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} settings.ini missing, default file created with SR5000 IP 10.8.253.207.", Color.DarkOrange);
-        }
-
         private void SetUp()
         {
-            EnsureSettingsFileExists();
             GetLanguage();
             GetTimerValue();
             GetAddressList();
@@ -755,7 +727,6 @@ namespace TcpClientProgram
 
         private void Kill()
         {
-            this.disconnect = true;
             tcpClientLogic.StopClient();
             buttonShoot.Enabled = false;
             buttonSend.Enabled = false;
@@ -763,12 +734,15 @@ namespace TcpClientProgram
             buttonUpload.Text = rm.GetString("upload");
             buttonDisconnect.Enabled = false;
             buttonConnect.Enabled = true;
+            this.disconnect = true;
             liveImageToolStripMenuItem.Enabled = false;
-
-            if (liveImage != null && !liveImage.IsDisposed)
-            {
-                liveImage.Close();
-            }
+            timerSetting.Dispose();
+            mailSetting.Dispose();
+            ipSetting.Dispose();
+            liveImage.Dispose();
+            countSetting.Dispose();
+            login.Dispose();
+            tcpClientLogic.Dispose();
         }
         
         private void SetLanguageText()
