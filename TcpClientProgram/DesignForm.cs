@@ -755,6 +755,7 @@ namespace TcpClientProgram
 
         private void Kill()
         {
+            this.disconnect = true;
             tcpClientLogic.StopClient();
             buttonShoot.Enabled = false;
             buttonSend.Enabled = false;
@@ -762,15 +763,12 @@ namespace TcpClientProgram
             buttonUpload.Text = rm.GetString("upload");
             buttonDisconnect.Enabled = false;
             buttonConnect.Enabled = true;
-            this.disconnect = true;
             liveImageToolStripMenuItem.Enabled = false;
-            timerSetting.Dispose();
-            mailSetting.Dispose();
-            ipSetting.Dispose();
-            liveImage.Dispose();
-            countSetting.Dispose();
-            login.Dispose();
-            tcpClientLogic.Dispose();
+
+            if (liveImage != null && !liveImage.IsDisposed)
+            {
+                liveImage.Close();
+            }
         }
         
         private void SetLanguageText()

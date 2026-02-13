@@ -1,16 +1,14 @@
 ﻿using MySql.Data.MySqlClient;
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using TcpClientProgram;
-using Microsoft.Runtime.CompilerServices;
-using System.Text.RegularExpressions;
-using System.IO;
 using NLog;
-using System.Collections.Generic;
+using TcpClientProgram;
 
 public class TcpClientLogic : IDisposable
 {
@@ -18,7 +16,6 @@ public class TcpClientLogic : IDisposable
     private DesignForm designForm;
     private MySqlConnection dbConnection;
     private NetworkStream clientStream;
-    private bool isListening = false;
     private CancellationTokenSource cancellationTokenSource;
     private string mysqlMessage;
     private int qty;
@@ -26,16 +23,15 @@ public class TcpClientLogic : IDisposable
     private int port;
     private bool disposed = false;
     private readonly object exportLock = new object();
+    private readonly object messageLock = new object();
+    private readonly StringBuilder receiveBuffer = new StringBuilder();
 
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
-    public NetworkStream ClientStream { get => clientStream; set => clientStream = value; }
-
-    public int Qty { get => qty; set => qty = value; }
-
-    public int Port { get => port; set => port = value; }
-
-    public string Ip { get => ip; set => ip = value; }
+    public NetworkStream ClientStream { get { return clientStream; } set { clientStream = value; } }
+    public int Qty { get { return qty; } set { qty = value; } }
+    public int Port { get { return port; } set { port = value; } }
+    public string Ip { get { return ip; } set { ip = value; } }
 
     public TcpClientLogic(DesignForm form)
     {
@@ -47,7 +43,7 @@ public class TcpClientLogic : IDisposable
         Thread.CurrentThread.CurrentCulture = CultureInfo.InvariantCulture;
         Thread.CurrentThread.CurrentUICulture = CultureInfo.InvariantCulture;
 
-        designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Attempting tcp connection ({ip}:{port})")));
+        designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Attempting tcp connection ({1}:{2})", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ip, port))));
 
         try
         {
@@ -55,27 +51,25 @@ public class TcpClientLogic : IDisposable
             await tcpClient.ConnectAsync(ip, port);
             clientStream = tcpClient.GetStream();
 
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Connected to reader ({ip}:{port})", System.Drawing.Color.Green)));
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Connected to reader ({1}:{2})", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ip, port), System.Drawing.Color.Green)));
 
             cancellationTokenSource = new CancellationTokenSource();
             await ListenForMessages(cancellationTokenSource.Token);
         }
         catch (Exception ex)
         {
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Error connecting to server:{ex.StackTrace} {ex.Message} {ex.InnerException}", System.Drawing.Color.Red)));
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Error connecting to server: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message), System.Drawing.Color.Red)));
         }
     }
 
     private async Task ListenForMessages(CancellationToken cancellationToken)
     {
-        isListening = true;
-
         try
         {
             while (!cancellationToken.IsCancellationRequested && clientStream != null && !designForm.disconnect)
             {
                 byte[] message = new byte[4096];
-                int bytesRead = await clientStream.ReadAsync(message, 0, 4096, cancellationToken);
+                int bytesRead = await clientStream.ReadAsync(message, 0, message.Length, cancellationToken);
 
                 if (bytesRead == 0)
                 {
@@ -86,26 +80,29 @@ public class TcpClientLogic : IDisposable
 
                 if (designForm.IsHandleCreated)
                 {
-                    //Log(receivedMessage);
                     Logger.Info(receivedMessage);
                     designForm.Invoke(new Action(() => designForm.DisplayMessage(receivedMessage)));
                 }
+
+                ProcessIncomingData(receivedMessage);
             }
         }
-        catch (ObjectDisposedException e)
+        catch (ObjectDisposedException)
         {
             Logger.Info("Disconnect");
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Disconnected", System.Drawing.Color.Black)));
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.Info("Read loop cancelled.");
         }
         catch (Exception ex)
         {
-            //Log(ex.Message + "\n" + ex.StackTrace + "\n" + ex.InnerException);
             Logger.Error(ex);
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Error reading from server: {ex.Message}", System.Drawing.Color.Red)));
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Error reading from server: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message), System.Drawing.Color.Red)));
         }
         finally
         {
-            isListening = false;
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Disconnected", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")), System.Drawing.Color.Black)));
             if (clientStream != null)
             {
                 clientStream.Close();
@@ -117,52 +114,88 @@ public class TcpClientLogic : IDisposable
         }
     }
 
+    private void ProcessIncomingData(string incoming)
+    {
+        List<ReaderScanRecord> extractedRows = new List<ReaderScanRecord>();
+
+        lock (messageLock)
+        {
+            receiveBuffer.Append(incoming);
+
+            while (true)
+            {
+                string bufferText = receiveBuffer.ToString();
+                int rowEnd = bufferText.IndexOf('$');
+                if (rowEnd < 0)
+                {
+                    break;
+                }
+
+                string oneRow = bufferText.Substring(0, rowEnd).Trim();
+                receiveBuffer.Remove(0, rowEnd + 1);
+
+                if (string.IsNullOrWhiteSpace(oneRow))
+                {
+                    continue;
+                }
+
+                ReaderScanRecord parsed = ParseSingleRow(oneRow);
+                if (parsed != null)
+                {
+                    extractedRows.Add(parsed);
+                }
+            }
+        }
+
+        if (extractedRows.Count == 0)
+        {
+            return;
+        }
+
+        qty = extractedRows.Count;
+        mysqlMessage = BuildRawMessage(extractedRows);
+
+        designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Total read barcode QTY: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), qty))));
+
+        ExportScanOutput(extractedRows, mysqlMessage);
+    }
+
+    private string BuildRawMessage(List<ReaderScanRecord> rows)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < rows.Count; i++)
+        {
+            sb.Append(rows[i].Code);
+            sb.Append(";");
+            sb.Append(rows[i].Image);
+            sb.Append("$");
+        }
+        return sb.ToString();
+    }
+
     public void SendMessage(string message)
     {
-    byte carriageReturn = 13; // ASCII code for carriage return
-
-    byte[] messageBytes = Encoding.ASCII.GetBytes($"{message}{(char)carriageReturn}");
+        byte carriageReturn = 13;
+        byte[] messageBytes = Encoding.ASCII.GetBytes(string.Format("{0}{1}", message, (char)carriageReturn));
 
         if (clientStream != null && clientStream.CanWrite)
         {
             try
             {
                 clientStream.Write(messageBytes, 0, messageBytes.Length);
-                //Log($"Sent:{message}[CR]");
-                Logger.Info($"Sent:{message}[CR]");
-                designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Sent:{message}[CR]", System.Drawing.Color.Blue)));
-
-                // Add logging for responses
-                if(message == "LOFF")
-                {
-                    byte[] responseBytes = new byte[4096];
-                    int responseBytesRead = clientStream.Read(responseBytes, 0, 4096);
-                    string receivedResponse = Encoding.UTF8.GetString(responseBytes, 0, responseBytesRead);
-                    qty = CountOccurrences(receivedResponse, "$");
-                    string pattern = ";01";
-                    mysqlMessage = receivedResponse;
-                    //MessageBox.Show(receivedResponse);
-                    //Log(receivedResponse);
-                    Logger.Info(receivedResponse);
-                    //designForm.Invoke(new Action(() => designForm.DisplayMessage($"\n{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Received response from server: \n{receivedResponse}")));
-                    designForm.Invoke(new Action(() => designForm.DisplayMessage($"\n{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Received response from server: \n{Regex.Replace(receivedResponse.Replace('$','\n').Replace('$','\n'),pattern,"")}")));
-                    designForm.Invoke(new Action(() => designForm.DisplayMessage($"\n{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Total read barcode QTY: {qty}")));
-                    ExportScanOutput(receivedResponse);
-                }
-
+                Logger.Info(string.Format("Sent:{0}[CR]", message));
+                designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Sent:{1}[CR]", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), message), System.Drawing.Color.Blue)));
             }
             catch (Exception e)
             {
-                //Log(e.Message + "\n" + e.StackTrace + "\n" + e.InnerException);
                 Logger.Error(e);
-                designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Data sending error:{e.StackTrace} {e.Message} {e.InnerException}", System.Drawing.Color.Red)));
+                designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Data sending error: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), e.Message), System.Drawing.Color.Red)));
             }
         }
         else
         {
-            //Log("clientStream cannot write");
             Logger.Error("clientStream cannot write");
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} clientStream cannot write", System.Drawing.Color.Red)));
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} clientStream cannot write", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")), System.Drawing.Color.Red)));
         }
     }
 
@@ -172,55 +205,57 @@ public class TcpClientLogic : IDisposable
         {
             this.cancellationTokenSource.Cancel();
             this.cancellationTokenSource.Dispose();
+            this.cancellationTokenSource = null;
         }
+
         if (this.clientStream != null)
         {
             this.clientStream.Dispose();
+            this.clientStream = null;
         }
-        try
+
+        if (tcpClient != null)
         {
-            isListening = false;
-            //cancellationTokenSource?.Cancel();
-            if (tcpClient != null)
-            {
-                tcpClient.Close();
-            }
-        }
-        catch(Exception ex)
-        {
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} disconnected", System.Drawing.Color.Red)));
+            tcpClient.Close();
+            tcpClient = null;
         }
     }
 
     public bool ConnectToMysql()
     {
+        if (string.IsNullOrWhiteSpace(mysqlMessage))
+        {
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} No scan data to upload.", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")), System.Drawing.Color.DarkOrange)));
+            return false;
+        }
+
         Thread.CurrentThread.CurrentUICulture = new CultureInfo("en-us");
-        //Log("Attempting mysql connection");
         Logger.Info("Attempting mysql connection");
-        designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Attempting mysql connection")));
+        designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Attempting mysql connection", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")))));
         dbConnection = new MySqlConnection("server=db3;user id=scripts;password=hmhuscripts;database=keyence;");
 
         try
         {
             dbConnection.Open();
-            //Log("Connected to mysql");
             Logger.Info("Connected to mysql");
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Connected to mysql", System.Drawing.Color.Green)));
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Connected to mysql", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")), System.Drawing.Color.Green)));
             UploadToMysql(mysqlMessage);
             return true;
         }
         catch (MySqlException ex)
         {
-            //Log(ex.Message + "\n" + ex.StackTrace + "\n" + ex.InnerException);
             Logger.Error(ex);
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Error connecting to mysql database:{ex.StackTrace} {ex.Message} {ex.InnerException}", System.Drawing.Color.Red)));
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Error connecting to mysql database: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message), System.Drawing.Color.Red)));
             return false;
         }
     }
 
     public void CloseMysqlConnection()
     {
-        dbConnection.Close();
+        if (dbConnection != null)
+        {
+            dbConnection.Close();
+        }
     }
 
     public void UploadToMysql(string message)
@@ -243,37 +278,20 @@ public class TcpClientLogic : IDisposable
                     }
                 }
             }
-            //Log("Mysql upload OK");
+
             Logger.Info("Mysql upload OK");
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Uploaded message to mysql database", System.Drawing.Color.Green)));
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Uploaded message to mysql database", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")), System.Drawing.Color.Green)));
         }
-        catch(Exception ex)
+        catch (Exception ex)
         {
             Logger.Error(ex);
-            //Log(ex.Message + "\n" + ex.StackTrace + "\n" + ex.InnerException);
-            designForm.Invoke(new Action(() => designForm.DisplayMessage($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} Error uploading to mysql database:{ex.StackTrace} {ex.Message} {ex.InnerException}", System.Drawing.Color.Red)));
+            designForm.Invoke(new Action(() => designForm.DisplayMessage(string.Format("{0} Error uploading to mysql database: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message), System.Drawing.Color.Red)));
         }
-
-    }
-
-    public void Log(string message)
-    {
-        /*string today = DateTime.Now.ToString("yyyyMMdd");
-        if (message.StartsWith(DateTime.Now.ToString("yyyy-mm-dd")))
-        {
-            File.AppendAllText($".\\log\\{today}.log", message + Environment.NewLine);
-        }
-        else
-        {
-            File.AppendAllText($".\\log\\{today}.log", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + message + Environment.NewLine);
-        }*/
-        
-
     }
 
     public void GetIp()
     {
-        String line;
+        string line;
         try
         {
             StreamReader sr = new StreamReader("settings.ini");
@@ -290,15 +308,14 @@ public class TcpClientLogic : IDisposable
             }
             sr.Close();
         }
-        catch (Exception ex)
+        catch
         {
-            //
         }
     }
 
     public void GetPort()
     {
-        String line;
+        string line;
         try
         {
             StreamReader sr = new StreamReader("settings.ini");
@@ -315,41 +332,20 @@ public class TcpClientLogic : IDisposable
             }
             sr.Close();
         }
-        catch (Exception ex)
+        catch
         {
-            //
         }
     }
 
-    private int CountOccurrences(string input, string substring)
+    private void ExportScanOutput(List<ReaderScanRecord> rows, string rawResponse)
     {
-        if (string.IsNullOrEmpty(input) || string.IsNullOrEmpty(substring))
-        {
-            return 0;
-        }
-
-        int count = 0;
-        int index = 0;
-
-        while ((index = input.IndexOf(substring, index)) != -1)
-        {
-            count++;
-            index += substring.Length; // Move past the substring
-        }
-
-        return count;
-    }
-
-    private void ExportScanOutput(string response)
-    {
-        List<ReaderScanRecord> rows = ParseReaderResponse(response);
-        if (rows.Count == 0)
+        if (rows == null || rows.Count == 0)
         {
             return;
         }
 
         string exportFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "output");
-        string filePrefix = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        string filePrefix = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
 
         lock (exportLock)
         {
@@ -359,7 +355,7 @@ public class TcpClientLogic : IDisposable
             string csvPath = Path.Combine(exportFolder, filePrefix + ".csv");
             string jsonPath = Path.Combine(exportFolder, filePrefix + ".json");
 
-            File.WriteAllText(txtPath, response);
+            File.WriteAllText(txtPath, rawResponse);
             File.WriteAllLines(csvPath, BuildCsvLines(rows));
             File.WriteAllText(jsonPath, BuildJson(rows));
 
@@ -373,6 +369,35 @@ public class TcpClientLogic : IDisposable
         }
     }
 
+    private ReaderScanRecord ParseSingleRow(string row)
+    {
+        string[] values = row.Split(';');
+        if (values.Length == 0)
+        {
+            return null;
+        }
+
+        string code = values[0].Trim();
+        if (string.IsNullOrEmpty(code))
+        {
+            return null;
+        }
+
+        string image = values.Length > 1 ? values[1].Trim() : string.Empty;
+
+        if (code == "01" || code.Equals("OK", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return new ReaderScanRecord
+        {
+            Code = code,
+            Image = image,
+            Timestamp = DateTime.Now
+        };
+    }
+
     private List<ReaderScanRecord> ParseReaderResponse(string response)
     {
         List<ReaderScanRecord> result = new List<ReaderScanRecord>();
@@ -380,36 +405,17 @@ public class TcpClientLogic : IDisposable
         {
             return result;
         }
+    }
 
         string[] rows = response.Split(new[] { '$' }, StringSplitOptions.RemoveEmptyEntries);
 
         foreach (string rawRow in rows)
         {
-            string row = rawRow.Trim();
-            if (string.IsNullOrEmpty(row))
+            ReaderScanRecord row = ParseSingleRow(rawRow.Trim());
+            if (row != null)
             {
-                continue;
+                result.Add(row);
             }
-
-            string[] values = row.Split(';');
-            if (values.Length == 0)
-            {
-                continue;
-            }
-
-            string code = values[0].Trim();
-            string image = values.Length > 1 ? values[1].Trim() : string.Empty;
-            if (string.IsNullOrEmpty(code))
-            {
-                continue;
-            }
-
-            result.Add(new ReaderScanRecord
-            {
-                Code = code,
-                Image = image,
-                Timestamp = DateTime.Now
-            });
         }
 
         return result;
@@ -481,56 +487,39 @@ public class TcpClientLogic : IDisposable
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
 
-    private class ReaderScanRecord
-    {
-        public string Code { get; set; }
-        public string Image { get; set; }
-        public DateTime Timestamp { get; set; }
-    }
-
     public void Dispose()
     {
         Dispose(true);
-        GC.SuppressFinalize(this); // Megakadályozza a finalize futását
+        GC.SuppressFinalize(this);
     }
 
-    // Ez a metódus végzi az erőforrások tényleges felszabadítását
     protected virtual void Dispose(bool disposing)
     {
         if (!disposed)
         {
             if (disposing)
             {
-                // Itt szabadítjuk fel a managed erőforrásokat (pl. más IDisposable objektumokat)
-                // Példa:
-                // if (managedResource != null)
-                // {
-                //     managedResource.Dispose();
-                //     managedResource = null;
-                // }
+                StopClient();
             }
 
-            // Itt szabadítjuk fel az unmanaged erőforrásokat (ha vannak)
-            // Példa:
-            // if (unmanagedResource != IntPtr.Zero)
-            // {
-            //     Marshal.FreeHGlobal(unmanagedResource);
-            //     unmanagedResource = IntPtr.Zero;
-            // }
-
-            disposed = true; // Az objektum most már dispose-olva van
+            disposed = true;
         }
     }
 
-    // Destruktor (finalizer), ami akkor fut le, ha az objektumot a GC felszabadítja
     ~TcpClientLogic()
     {
         Dispose(false);
     }
 
-    // Nyilvános metódus, amely ellenőrzi, hogy az objektum dispose-olva van-e
     public bool IsDisposed()
     {
         return disposed;
+    }
+
+    private class ReaderScanRecord
+    {
+        public string Code { get; set; }
+        public string Image { get; set; }
+        public DateTime Timestamp { get; set; }
     }
 }
