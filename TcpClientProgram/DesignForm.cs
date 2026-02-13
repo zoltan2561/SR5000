@@ -217,9 +217,13 @@ namespace TcpClientProgram
                 countdownTimer.Stop();
                 tcpClientLogic.SendMessage("LOFF");
                 labelTimer.Text = $"Last read {tcpClientLogic.Qty} barcodes at: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}";
-                if(tcpClientLogic.Qty < Int32.Parse(this.scancount))
+
+                int expectedCount = 0;
+                Int32.TryParse((this.scancount ?? string.Empty).Trim(), out expectedCount);
+
+                if(expectedCount > 0 && tcpClientLogic.Qty < expectedCount)
                 {
-                    DialogResult dr = MessageBox.Show($"Count of readed QR ({tcpClientLogic.Qty}) is less than set count ({this.scancount}). Do you still want to upload?","Warning",MessageBoxButtons.YesNo);
+                    DialogResult dr = MessageBox.Show($"Count of readed QR ({tcpClientLogic.Qty}) is less than set count ({expectedCount}). Do you still want to upload?","Warning",MessageBoxButtons.YesNo);
                     switch (dr)
                     {
                         case DialogResult.Yes:
