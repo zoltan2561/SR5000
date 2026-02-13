@@ -6,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using TcpClientProgram;
@@ -217,13 +218,23 @@ public class TcpClientLogic : IDisposable
     private void FinalizeCaptureAndExport()
     {
         List<ReaderScanRecord> snapshot;
+        string rawBuffer;
 
         lock (sync)
         {
             captureActive = false;
             snapshot = new List<ReaderScanRecord>(currentBatch);
+
+            rawBuffer = incomingBuffer.ToString();
+            if (snapshot.Count == 0 && !string.IsNullOrWhiteSpace(rawBuffer))
+            {
+                snapshot = ParseReaderResponse(rawBuffer);
+            }
+
             qty = snapshot.Count;
             mysqlMessage = BuildRawMessage(snapshot);
+
+            incomingBuffer.Clear();
         }
 
         if (designForm.IsHandleCreated)
@@ -401,7 +412,8 @@ public class TcpClientLogic : IDisposable
             return null;
         }
 
-        string code = values[0].Trim();
+        string firstToken = values[0].Trim();
+        string code = ExtractBarcode(firstToken);
         string image = values.Length > 1 ? values[1].Trim() : string.Empty;
 
         if (string.IsNullOrWhiteSpace(code) || code == "01" || code.Equals("OK", StringComparison.OrdinalIgnoreCase))
@@ -449,7 +461,54 @@ public class TcpClientLogic : IDisposable
             }
         }
 
+        if (result.Count == 0)
+        {
+            string[] fallbackRows = response.Split(new[] { ',', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string token in fallbackRows)
+            {
+                string cleanedToken = token.Trim();
+                if (string.IsNullOrWhiteSpace(cleanedToken))
+                {
+                    continue;
+                }
+
+                if (cleanedToken.Contains("/") || cleanedToken.IndexOf("http", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    continue;
+                }
+
+                string barcode = ExtractBarcode(cleanedToken);
+                if (string.IsNullOrWhiteSpace(barcode))
+                {
+                    continue;
+                }
+
+                result.Add(new ReaderScanRecord
+                {
+                    Code = barcode,
+                    Image = string.Empty,
+                    Timestamp = DateTime.Now
+                });
+            }
+        }
+
         return result;
+    }
+
+    private string ExtractBarcode(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return string.Empty;
+        }
+
+        Match match = Regex.Match(input.Trim(), "^\\d{8,20}");
+        if (!match.Success)
+        {
+            return string.Empty;
+        }
+
+        return match.Value;
     }
 
     private void ExportScanOutput(List<ReaderScanRecord> rows, string rawResponse)
