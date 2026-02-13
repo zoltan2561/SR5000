@@ -203,6 +203,17 @@ public class TcpClientLogic : IDisposable
             {
                 FinalizeCaptureAndExport();
             }
+
+            qty = snapshot.Count;
+            mysqlMessage = BuildRawMessage(snapshot);
+
+            incomingBuffer.Clear();
+        }
+
+        if (designForm.IsHandleCreated)
+        {
+            designForm.Invoke(new Action(() =>
+                designForm.DisplayMessage(string.Format("{0} Total read barcode QTY: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), qty))));
         }
         catch (Exception ex)
         {
@@ -330,11 +341,11 @@ public class TcpClientLogic : IDisposable
             {
                 foreach (ReaderScanRecord row in rows)
                 {
-                    string sql = "INSERT INTO test (code, image, created_at) VALUES (@code, @image, NOW())";
+                    string sql = "INSERT INTO test (data, image) VALUES (@data, @image)";
                     using (MySqlCommand cmd = new MySqlCommand(sql, dbConnection))
                     {
-                        cmd.Parameters.AddWithValue("@code", row.Code);
-                        cmd.Parameters.AddWithValue("@image", row.Image);
+                        cmd.Parameters.AddWithValue("@data", row.Code);
+                        cmd.Parameters.AddWithValue("@image", row.Image ?? string.Empty);
                         cmd.ExecuteNonQuery();
                     }
                 }
@@ -451,45 +462,35 @@ public class TcpClientLogic : IDisposable
             return result;
         }
 
-        string[] rows = response.Split(new[] { '$' }, StringSplitOptions.RemoveEmptyEntries);
-        foreach (string rawRow in rows)
+        if (response.Contains("$"))
         {
-            ReaderScanRecord record = ParseRow(rawRow.Trim());
-            if (record != null)
+            string[] rows = response.Split(new[] { '$' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string rawRow in rows)
             {
-                result.Add(record);
+                ReaderScanRecord record = ParseRow(rawRow.Trim());
+                if (record != null)
+                {
+                    result.Add(record);
+                }
             }
+
+            return result;
         }
 
-        if (result.Count == 0)
+        MatchCollection matches = Regex.Matches(response, @"(?<!\d)\d{8,20}(?!\d)");
+        foreach (Match match in matches)
         {
-            string[] fallbackRows = response.Split(new[] { ',', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (string token in fallbackRows)
+            if (!match.Success)
             {
-                string cleanedToken = token.Trim();
-                if (string.IsNullOrWhiteSpace(cleanedToken))
-                {
-                    continue;
-                }
-
-                if (cleanedToken.Contains("/") || cleanedToken.IndexOf("http", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    continue;
-                }
-
-                string barcode = ExtractBarcode(cleanedToken);
-                if (string.IsNullOrWhiteSpace(barcode))
-                {
-                    continue;
-                }
-
-                result.Add(new ReaderScanRecord
-                {
-                    Code = barcode,
-                    Image = string.Empty,
-                    Timestamp = DateTime.Now
-                });
+                continue;
             }
+
+            result.Add(new ReaderScanRecord
+            {
+                Code = match.Value,
+                Image = string.Empty,
+                Timestamp = DateTime.Now
+            });
         }
 
         return result;
@@ -541,11 +542,11 @@ public class TcpClientLogic : IDisposable
     private IEnumerable<string> BuildCsvLines(IEnumerable<ReaderScanRecord> rows)
     {
         List<string> lines = new List<string>();
-        lines.Add("code;image;timestamp");
+        lines.Add("data");
 
         foreach (ReaderScanRecord row in rows)
         {
-            lines.Add(string.Format("{0};{1};{2}", EscapeCsvValue(row.Code), EscapeCsvValue(row.Image), row.Timestamp.ToString("o")));
+            lines.Add(EscapeCsvValue(row.Code));
         }
 
         return lines;
@@ -579,9 +580,7 @@ public class TcpClientLogic : IDisposable
                 sb.AppendLine(",");
             }
 
-            sb.Append("  {\"code\":\"").Append(JsonEscape(row.Code))
-              .Append("\",\"image\":\"").Append(JsonEscape(row.Image))
-              .Append("\",\"timestamp\":\"").Append(row.Timestamp.ToString("o"))
+            sb.Append("  {\"data\":\"").Append(JsonEscape(row.Code))
               .Append("\"}");
 
             first = false;
