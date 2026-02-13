@@ -25,14 +25,19 @@ public class TcpClientLogic : IDisposable
     private string ip;
     private int port;
     private int qty;
-    private string mysqlMessage;
+
+    private string lastRawMessage;
 
     private bool disposed;
     private bool captureActive;
+
     private readonly StringBuilder incomingBuffer = new StringBuilder();
     private readonly List<ReaderScanRecord> currentBatch = new List<ReaderScanRecord>();
 
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
+    // QR rekord kezdete: 10 számjegy (OPC)
+    private static readonly Regex QrStartRegex = new Regex(@"(?<!\d)\d{10}", RegexOptions.Compiled);
 
     public NetworkStream ClientStream { get { return clientStream; } set { clientStream = value; } }
     public int Qty { get { return qty; } set { qty = value; } }
@@ -49,8 +54,7 @@ public class TcpClientLogic : IDisposable
         Thread.CurrentThread.CurrentCulture = CultureInfo.InvariantCulture;
         Thread.CurrentThread.CurrentUICulture = CultureInfo.InvariantCulture;
 
-        SafeUiMessage(string.Format(
-            "{0} Attempting tcp connection ({1}:{2})",
+        SafeUiMessage(string.Format("{0} Attempting tcp connection ({1}:{2})",
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ip, port));
 
         try
@@ -59,27 +63,23 @@ public class TcpClientLogic : IDisposable
 
             tcpClient = new TcpClient();
             await tcpClient.ConnectAsync(ip, port);
-
             clientStream = tcpClient.GetStream();
             cancellationTokenSource = new CancellationTokenSource();
 
-            SafeUiMessage(string.Format(
-                "{0} Connected to reader ({1}:{2})",
+            SafeUiMessage(string.Format("{0} Connected to reader ({1}:{2})",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ip, port),
                 System.Drawing.Color.Green);
 
             listenTask = Task.Factory.StartNew(
-                    () => ListenLoop(cancellationTokenSource.Token),
-                    cancellationTokenSource.Token,
-                    TaskCreationOptions.LongRunning,
-                    TaskScheduler.Default)
-                .Unwrap();
+                () => ListenLoop(cancellationTokenSource.Token),
+                cancellationTokenSource.Token,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default).Unwrap();
         }
         catch (Exception ex)
         {
             Logger.Error(ex);
-            SafeUiMessage(string.Format(
-                "{0} Error connecting to reader: {1}",
+            SafeUiMessage(string.Format("{0} Error connecting to reader: {1}",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message),
                 System.Drawing.Color.Red);
         }
@@ -115,15 +115,13 @@ public class TcpClientLogic : IDisposable
         catch (Exception ex)
         {
             Logger.Error(ex);
-            SafeUiMessage(string.Format(
-                "{0} Error reading from reader: {1}",
+            SafeUiMessage(string.Format("{0} Error reading from reader: {1}",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message),
                 System.Drawing.Color.Red);
         }
         finally
         {
-            SafeUiMessage(string.Format(
-                "{0} Disconnected",
+            SafeUiMessage(string.Format("{0} Disconnected",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.Black);
         }
@@ -131,12 +129,13 @@ public class TcpClientLogic : IDisposable
 
     private void ProcessIncomingChunk(string chunk)
     {
-        List<ReaderScanRecord> parsed = new List<ReaderScanRecord>();
+        List<ReaderScanRecord> parsedDollar = new List<ReaderScanRecord>();
 
         lock (sync)
         {
             incomingBuffer.Append(chunk);
 
+            // ha van $ framing, abból azonnal szedjük a sorokat
             while (true)
             {
                 string text = incomingBuffer.ToString();
@@ -147,14 +146,13 @@ public class TcpClientLogic : IDisposable
                 incomingBuffer.Remove(0, idx + 1);
 
                 ReaderScanRecord row = ParseRow(oneRow);
-                if (row != null) parsed.Add(row);
+                if (row != null) parsedDollar.Add(row);
             }
 
-            if (captureActive && parsed.Count > 0)
+            if (captureActive && parsedDollar.Count > 0)
             {
-                currentBatch.AddRange(parsed);
+                currentBatch.AddRange(parsedDollar);
                 qty = currentBatch.Count;
-                mysqlMessage = BuildRawMessage(currentBatch);
             }
         }
     }
@@ -163,8 +161,7 @@ public class TcpClientLogic : IDisposable
     {
         if (string.IsNullOrWhiteSpace(message))
         {
-            SafeUiMessage(string.Format(
-                "{0} Empty message ignored.",
+            SafeUiMessage(string.Format("{0} Empty message ignored.",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.DarkOrange);
             return;
@@ -172,8 +169,7 @@ public class TcpClientLogic : IDisposable
 
         if (clientStream == null || !clientStream.CanWrite)
         {
-            SafeUiMessage(string.Format(
-                "{0} clientStream cannot write",
+            SafeUiMessage(string.Format("{0} clientStream cannot write",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.Red);
             return;
@@ -183,39 +179,39 @@ public class TcpClientLogic : IDisposable
 
         try
         {
-            // LON: capture start
             if (message.Equals("LON", StringComparison.OrdinalIgnoreCase))
             {
                 lock (sync)
                 {
                     captureActive = true;
                     qty = 0;
-                    mysqlMessage = string.Empty;
+                    lastRawMessage = string.Empty;
                     currentBatch.Clear();
-                    // fontos: nem törlünk incomingBuffer-t, mert ha a reader már küld,
-                    // akkor később LOFF-nál még kellhet. Ha akarod: incomingBuffer.Clear();
+                    // incomingBuffer.Clear(); // NE töröld, lehet késleltetett válasz
                 }
             }
 
             clientStream.Write(payload, 0, payload.Length);
             Logger.Info(string.Format("Sent:{0}[CR]", message));
 
-            SafeUiMessage(string.Format(
-                "{0} Sent:{1}[CR]",
+            SafeUiMessage(string.Format("{0} Sent:{1}[CR]",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), message),
                 System.Drawing.Color.Blue);
 
-            // LOFF: capture stop + export
             if (message.Equals("LOFF", StringComparison.OrdinalIgnoreCase))
             {
-                FinalizeCaptureAndExport();
+                // .NET 4.0 / régebbi: nincs Task.Run -> ThreadPool
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    Thread.Sleep(800); // állítható
+                    FinalizeCaptureAndExport();
+                });
             }
         }
         catch (Exception ex)
         {
             Logger.Error(ex);
-            SafeUiMessage(string.Format(
-                "{0} Data sending error: {1}",
+            SafeUiMessage(string.Format("{0} Data sending error: {1}",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message),
                 System.Drawing.Color.Red);
         }
@@ -232,36 +228,57 @@ public class TcpClientLogic : IDisposable
 
             snapshot = new List<ReaderScanRecord>(currentBatch);
 
-            // ha valamiért nem $-ra darabolva ment át, itt még próbáljuk regex-szel
             rawBuffer = incomingBuffer.ToString();
-            if (snapshot.Count == 0 && !string.IsNullOrWhiteSpace(rawBuffer))
+            lastRawMessage = rawBuffer ?? string.Empty;
+
+            if (!string.IsNullOrWhiteSpace(rawBuffer))
             {
-                snapshot = ParseReaderResponse(rawBuffer);
+                var fromBuffer = ParseReaderResponse(rawBuffer);
+                if (fromBuffer.Count > 0)
+                {
+                    snapshot.AddRange(fromBuffer);
+                }
             }
 
+            snapshot = DeduplicateByCode(snapshot);
             qty = snapshot.Count;
-            mysqlMessage = BuildRawMessage(snapshot);
 
-            // lezárás után tisztítunk, hogy a következő run tiszta legyen
             incomingBuffer.Clear();
             currentBatch.Clear();
         }
 
-        SafeUiMessage(string.Format(
-            "{0} Total read barcode QTY: {1}",
+        SafeUiMessage(string.Format("{0} Total read barcode QTY: {1}",
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), qty));
 
         if (snapshot.Count > 0)
         {
-            ExportScanOutput(snapshot, mysqlMessage);
+            ExportScanOutput(snapshot);
         }
         else
         {
-            SafeUiMessage(string.Format(
-                "{0} No barcode captured.",
+            SafeUiMessage(string.Format("{0} No barcode captured.",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.DarkOrange);
         }
+    }
+
+    private List<ReaderScanRecord> DeduplicateByCode(List<ReaderScanRecord> rows)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var outList = new List<ReaderScanRecord>();
+
+        foreach (var r in rows)
+        {
+            if (r == null) continue;
+            var code = (r.Code ?? string.Empty).Trim();
+            if (code.Length == 0) continue;
+
+            if (seen.Add(code))
+            {
+                outList.Add(r);
+            }
+        }
+        return outList;
     }
 
     public void StopClient()
@@ -288,46 +305,46 @@ public class TcpClientLogic : IDisposable
         listenTask = null;
     }
 
+    // ========= MYSQL =========
+
     public bool ConnectToMysql()
     {
-        string messageToUpload;
+        // feltöltéshez a legutolsó raw dumpból parse-olunk
+        List<ReaderScanRecord> snapshot;
         lock (sync)
         {
-            messageToUpload = mysqlMessage;
+            snapshot = ParseReaderResponse(lastRawMessage);
+            snapshot = DeduplicateByCode(snapshot);
         }
 
-        if (string.IsNullOrWhiteSpace(messageToUpload))
+        if (snapshot == null || snapshot.Count == 0)
         {
-            SafeUiMessage(string.Format(
-                "{0} No scan data to upload.",
+            SafeUiMessage(string.Format("{0} No scan data to upload.",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.DarkOrange);
             return false;
         }
 
-        SafeUiMessage(string.Format(
-            "{0} Attempting mysql connection",
+        SafeUiMessage(string.Format("{0} Attempting mysql connection",
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
 
-        // TODO: ezt inkább configból, ne hardcode-olva
         dbConnection = new MySqlConnection("server=db3;user id=scripts;password=hmhuscripts;database=keyence;");
 
         try
         {
             dbConnection.Open();
-            SafeUiMessage(string.Format(
-                "{0} Connected to mysql",
+            SafeUiMessage(string.Format("{0} Connected to mysql",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.Green);
 
-            UploadToMysql(messageToUpload);
+            // public helyett legyen private/internal -> megszűnik az accessibility hiba
+            UploadToMysqlInternal(snapshot);
             return true;
         }
         catch (Exception ex)
         {
             Logger.Error(ex);
-            SafeUiMessage(string.Format(
-                "{0} Error connecting to mysql database: {1}",
+            SafeUiMessage(string.Format("{0} Error connecting to mysql database: {1}",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message),
                 System.Drawing.Color.Red);
             return false;
@@ -342,46 +359,55 @@ public class TcpClientLogic : IDisposable
         }
     }
 
-    public void UploadToMysql(string message)
+    // CS0051 fix: ne legyen public, mert ReaderScanRecord private nested type
+    private void UploadToMysqlInternal(List<ReaderScanRecord> rows)
     {
         if (dbConnection == null || dbConnection.State != System.Data.ConnectionState.Open)
         {
-            SafeUiMessage(string.Format(
-                "{0} MySQL connection is not open.",
+            SafeUiMessage(string.Format("{0} MySQL connection is not open.",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.Red);
             return;
         }
 
-        List<ReaderScanRecord> rows = ParseReaderResponse(message);
-
         try
         {
-            foreach (ReaderScanRecord row in rows)
+            const string sql = "INSERT INTO test (data, image) VALUES (@data, @image)";
+            using (var cmd = new MySqlCommand(sql, dbConnection))
             {
-                const string sql = "INSERT INTO test (data, image) VALUES (@data, @image)";
-                using (MySqlCommand cmd = new MySqlCommand(sql, dbConnection))
-                {
-                    cmd.Parameters.AddWithValue("@data", row.Code);
-                    cmd.Parameters.AddWithValue("@image", row.Image ?? string.Empty);
-                    cmd.ExecuteNonQuery();
-                }
-            }
+                var pData = cmd.Parameters.Add("@data", MySqlDbType.VarChar);
+                var pImg = cmd.Parameters.Add("@image", MySqlDbType.VarChar);
 
-            SafeUiMessage(string.Format(
-                "{0} Uploaded message to mysql database (rows: {1})",
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), rows.Count),
-                System.Drawing.Color.Green);
+                int inserted = 0;
+
+                foreach (var row in rows)
+                {
+                    if (row == null) continue;
+                    var code = (row.Code ?? string.Empty).Trim();
+                    if (code.Length == 0) continue;
+
+                    pData.Value = code;
+                    pImg.Value = (row.Image ?? string.Empty);
+
+                    cmd.ExecuteNonQuery();
+                    inserted++;
+                }
+
+                SafeUiMessage(string.Format("{0} Uploaded to mysql database (rows: {1})",
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), inserted),
+                    System.Drawing.Color.Green);
+            }
         }
         catch (Exception ex)
         {
             Logger.Error(ex);
-            SafeUiMessage(string.Format(
-                "{0} Error uploading to mysql database: {1}",
+            SafeUiMessage(string.Format("{0} Error uploading to mysql database: {1}",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message),
                 System.Drawing.Color.Red);
         }
     }
+
+    // ========= SETTINGS =========
 
     public void GetIp()
     {
@@ -400,9 +426,7 @@ public class TcpClientLogic : IDisposable
                 }
             }
         }
-        catch
-        {
-        }
+        catch { }
     }
 
     public void GetPort()
@@ -422,75 +446,94 @@ public class TcpClientLogic : IDisposable
                 }
             }
         }
-        catch
-        {
-        }
+        catch { }
     }
+
+    // ========= PARSE =========
 
     private ReaderScanRecord ParseRow(string row)
     {
         if (string.IsNullOrWhiteSpace(row)) return null;
 
-        string[] values = row.Split(';');
-        if (values.Length == 0) return null;
+        string codePart = row;
+        string imagePart = string.Empty;
 
-        string firstToken = values[0].Trim();
-        string code = ExtractBarcode(firstToken);
-        string image = values.Length > 1 ? values[1].Trim() : string.Empty;
-
-        if (string.IsNullOrWhiteSpace(code) ||
-            code == "01" ||
-            code.Equals("OK", StringComparison.OrdinalIgnoreCase))
+        if (row.Contains(";"))
         {
-            return null;
+            var values = row.Split(';');
+            codePart = values.Length > 0 ? values[0] : row;
+            imagePart = values.Length > 1 ? values[1] : string.Empty;
         }
+
+        string code = ExtractFullCode(codePart);
+        if (string.IsNullOrWhiteSpace(code)) return null;
 
         return new ReaderScanRecord
         {
             Code = code,
-            Image = image,
+            Image = imagePart == null ? string.Empty : imagePart.Trim(),
             Timestamp = DateTime.Now
         };
     }
 
-    private string BuildRawMessage(List<ReaderScanRecord> rows)
+    private string ExtractFullCode(string input)
     {
-        StringBuilder sb = new StringBuilder();
-        foreach (ReaderScanRecord row in rows)
-        {
-            sb.Append(row.Code);
-            sb.Append(';');
-            sb.Append(row.Image ?? string.Empty);
-            sb.Append('$');
-        }
-        return sb.ToString();
+        if (string.IsNullOrWhiteSpace(input)) return string.Empty;
+
+        string s = input.Trim();
+        if (s.Equals("OK", StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        if (s.Equals("01", StringComparison.OrdinalIgnoreCase)) return string.Empty;
+
+        return s;
     }
 
     private List<ReaderScanRecord> ParseReaderResponse(string response)
     {
-        List<ReaderScanRecord> result = new List<ReaderScanRecord>();
+        var result = new List<ReaderScanRecord>();
         if (string.IsNullOrWhiteSpace(response)) return result;
+
+        int noiseIdx = response.IndexOf("/webscripts/", StringComparison.OrdinalIgnoreCase);
+        if (noiseIdx >= 0)
+        {
+            response = response.Substring(0, noiseIdx);
+        }
 
         if (response.Contains("$"))
         {
             string[] rows = response.Split(new[] { '$' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (string rawRow in rows)
             {
-                ReaderScanRecord record = ParseRow(rawRow.Trim());
-                if (record != null) result.Add(record);
+                var rec = ParseRow(rawRow.Trim());
+                if (rec != null) result.Add(rec);
             }
             return result;
         }
 
-        // fallback: ha “ömlesztett” válasz, kinyerünk 8-20 számjegyet
-        MatchCollection matches = Regex.Matches(response, @"(?<!\d)\d{8,20}(?!\d)");
-        foreach (Match match in matches)
+        MatchCollection m = QrStartRegex.Matches(response);
+
+        if (m.Count == 0)
         {
-            if (!match.Success) continue;
+            var one = response.Trim().Trim(',');
+            if (!string.IsNullOrWhiteSpace(one))
+            {
+                result.Add(new ReaderScanRecord { Code = one, Image = "", Timestamp = DateTime.Now });
+            }
+            return result;
+        }
+
+        for (int i = 0; i < m.Count; i++)
+        {
+            int start = m[i].Index;
+            int end = (i + 1 < m.Count) ? m[i + 1].Index : response.Length;
+
+            string piece = response.Substring(start, end - start).Trim();
+            piece = piece.Trim().Trim(',');
+
+            if (!Regex.IsMatch(piece, @"^\d{10}")) continue;
 
             result.Add(new ReaderScanRecord
             {
-                Code = match.Value,
+                Code = piece,
                 Image = string.Empty,
                 Timestamp = DateTime.Now
             });
@@ -499,15 +542,9 @@ public class TcpClientLogic : IDisposable
         return result;
     }
 
-    private string ExtractBarcode(string input)
-    {
-        if (string.IsNullOrWhiteSpace(input)) return string.Empty;
+    // ========= EXPORT =========
 
-        Match match = Regex.Match(input.Trim(), @"^\d{8,20}");
-        return match.Success ? match.Value : string.Empty;
-    }
-
-    private void ExportScanOutput(List<ReaderScanRecord> rows, string rawResponse)
+    private void ExportScanOutput(List<ReaderScanRecord> rows)
     {
         string exportFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "output");
         string filePrefix = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
@@ -518,22 +555,22 @@ public class TcpClientLogic : IDisposable
         string csvPath = Path.Combine(exportFolder, filePrefix + ".csv");
         string jsonPath = Path.Combine(exportFolder, filePrefix + ".json");
 
-        File.WriteAllText(txtPath, rawResponse ?? string.Empty);
+        File.WriteAllText(txtPath, lastRawMessage ?? string.Empty);
         File.WriteAllLines(csvPath, BuildCsvLines(rows));
         File.WriteAllText(jsonPath, BuildJson(rows));
 
-        SafeUiMessage(string.Format(
-            "{0} Exported scan output: {1}, {2}, {3}",
-            DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            Path.GetFileName(txtPath),
-            Path.GetFileName(csvPath),
-            Path.GetFileName(jsonPath)),
+        SafeUiMessage(string.Format("{0} Exported scan output: {1}, {2}, {3}",
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                Path.GetFileName(txtPath),
+                Path.GetFileName(csvPath),
+                Path.GetFileName(jsonPath)),
             System.Drawing.Color.DarkGreen);
     }
 
     private IEnumerable<string> BuildCsvLines(IEnumerable<ReaderScanRecord> rows)
     {
-        List<string> lines = new List<string> { "data" };
+        List<string> lines = new List<string>();
+        lines.Add("data");
 
         foreach (ReaderScanRecord row in rows)
         {
@@ -547,7 +584,7 @@ public class TcpClientLogic : IDisposable
     {
         if (value == null) return string.Empty;
 
-        if (value.Contains(";") || value.Contains("\"") || value.Contains("\n") || value.Contains("\r"))
+        if (value.Contains(",") || value.Contains("\"") || value.Contains("\n") || value.Contains("\r"))
         {
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         }
@@ -563,10 +600,14 @@ public class TcpClientLogic : IDisposable
         bool first = true;
         foreach (ReaderScanRecord row in rows)
         {
+            if (row == null) continue;
+            string code = (row.Code ?? string.Empty).Trim();
+            if (code.Length == 0) continue;
+
             if (!first) sb.AppendLine(",");
 
             sb.Append("  {\"data\":\"")
-              .Append(JsonEscape(row.Code))
+              .Append(JsonEscape(code))
               .Append("\"}");
 
             first = false;
@@ -582,6 +623,8 @@ public class TcpClientLogic : IDisposable
         if (string.IsNullOrEmpty(value)) return string.Empty;
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
+
+    // ========= UI =========
 
     private void SafeUiMessage(string message, System.Drawing.Color? color = null)
     {
@@ -604,10 +647,7 @@ public class TcpClientLogic : IDisposable
                 else designForm.DisplayMessage(message);
             }
         }
-        catch
-        {
-            // UI race esetén inkább csendben elengedjük
-        }
+        catch { }
     }
 
     public void Dispose()
@@ -628,9 +668,7 @@ public class TcpClientLogic : IDisposable
             StopClient();
             CloseMysqlConnection();
         }
-        catch
-        {
-        }
+        catch { }
     }
 
     public bool IsDisposed()
