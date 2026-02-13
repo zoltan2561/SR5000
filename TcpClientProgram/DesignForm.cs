@@ -216,26 +216,37 @@ namespace TcpClientProgram
                 // Stop the timer
                 countdownTimer.Stop();
                 tcpClientLogic.SendMessage("LOFF");
-                labelTimer.Text = $"Last read {tcpClientLogic.Qty} barcodes at: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}";
-                if(tcpClientLogic.Qty < Int32.Parse(this.scancount))
+
+                // VÁRUNK, hogy a LOFF után a beolvasás + parse + qty frissítés lefusson
+                await TaskEx.Delay(1200); // állítható: 800-1500ms
+
+                int targetQty = 0;
+                int.TryParse((this.scancount ?? "").Trim(), out targetQty);
+
+                int actualQty = tcpClientLogic.Qty; // ekkor már stabil
+
+                labelTimer.Text = $"Last read {actualQty} barcodes at: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}";
+
+                if (actualQty < targetQty)
                 {
-                    DialogResult dr = MessageBox.Show($"Count of readed QR ({tcpClientLogic.Qty}) is less than set count ({this.scancount}). Do you still want to upload?","Warning",MessageBoxButtons.YesNo);
-                    switch (dr)
-                    {
-                        case DialogResult.Yes:
-                            tcpClientLogic.ConnectToMysql();
-                            break;
-                        case DialogResult.No:
-                            break;
-                    }
-                }
-                else
-                {
-                    if(this.autoupload == 1)
+                    DialogResult dr = MessageBox.Show(
+                        $"Count of readed QR ({actualQty}) is less than SET count ({targetQty}). Do you still want to upload to DB?",
+                        "Warning",
+                        MessageBoxButtons.YesNo);
+
+                    if (dr == DialogResult.Yes)
                     {
                         tcpClientLogic.ConnectToMysql();
                     }
                 }
+                else
+                {
+                    if (this.autoupload == 1)
+                    {
+                        tcpClientLogic.ConnectToMysql();
+                    }
+                }
+
                 buttonShoot.BackColor = SystemColors.ButtonFace;
                 progressBar.Close();
                 progressBar.SetProgressBarValue(0);
