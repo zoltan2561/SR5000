@@ -405,6 +405,7 @@ public class TcpClientLogic : IDisposable
         {
             return result;
         }
+    }
 
         string[] rows = response.Split(new[] { '$' }, StringSplitOptions.RemoveEmptyEntries);
 
