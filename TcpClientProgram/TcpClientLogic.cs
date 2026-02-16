@@ -359,7 +359,7 @@ public class TcpClientLogic : IDisposable
         }
     }
 
-    // CS0051 fix: ne legyen public, mert ReaderScanRecord private nested type
+    // CS0051 fix: ne legyen public, mert ReaderScanRecord private nested typea
     private void UploadToMysqlInternal(List<ReaderScanRecord> rows)
     {
         if (dbConnection == null || dbConnection.State != System.Data.ConnectionState.Open)
