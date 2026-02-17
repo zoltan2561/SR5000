@@ -34,10 +34,16 @@ public class TcpClientLogic : IDisposable
     private readonly StringBuilder incomingBuffer = new StringBuilder();
     private readonly List<ReaderScanRecord> currentBatch = new List<ReaderScanRecord>();
 
+    // LOFF után tail beérkezéshez (idle-wait)
+    private DateTime lastChunkUtc = DateTime.MinValue;
+
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
-    // QR rekord kezdete: 10 számjegy (OPC)
-    private static readonly Regex QrStartRegex = new Regex(@"(?<!\d)\d{10}", RegexOptions.Compiled);
+    // OPC mindig 10 számjegy
+    private static readonly Regex OpcRegex = new Regex(@"^\d{10}$", RegexOptions.Compiled);
+
+    // DM nálad jellemzően 24 számjegy (de hagyok tartományt)
+    private static readonly Regex DmRegex = new Regex(@"^\d{16,32}$", RegexOptions.Compiled);
 
     public NetworkStream ClientStream { get { return clientStream; } set { clientStream = value; } }
     public int Qty { get { return qty; } set { qty = value; } }
@@ -96,11 +102,15 @@ public class TcpClientLogic : IDisposable
                 int bytesRead = await clientStream.ReadAsync(buffer, 0, buffer.Length, token);
                 if (bytesRead <= 0) break;
 
+                lock (sync)
+                {
+                    lastChunkUtc = DateTime.UtcNow;
+                }
+
                 string chunk = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                 Logger.Info(chunk);
 
                 SafeUiMessage(chunk);
-
                 ProcessIncomingChunk(chunk);
             }
         }
@@ -127,33 +137,18 @@ public class TcpClientLogic : IDisposable
         }
     }
 
+    /// <summary>
+    /// Nálad a Keyence sokszor EGY sorban (batch) küldi a több kódot,
+    /// és CR (0D) csak a végén van. Ezért itt csak bufferelünk.
+    /// </summary>
     private void ProcessIncomingChunk(string chunk)
     {
-        List<ReaderScanRecord> parsedDollar = new List<ReaderScanRecord>();
-
         lock (sync)
         {
             incomingBuffer.Append(chunk);
 
-            // ha van $ framing, abból azonnal szedjük a sorokat
-            while (true)
-            {
-                string text = incomingBuffer.ToString();
-                int idx = text.IndexOf('$');
-                if (idx < 0) break;
-
-                string oneRow = text.Substring(0, idx).Trim();
-                incomingBuffer.Remove(0, idx + 1);
-
-                ReaderScanRecord row = ParseRow(oneRow);
-                if (row != null) parsedDollar.Add(row);
-            }
-
-            if (captureActive && parsedDollar.Count > 0)
-            {
-                currentBatch.AddRange(parsedDollar);
-                qty = currentBatch.Count;
-            }
+            // opcionális: ha captureActive, lehetne itt is parse-olni CR-es sorokra,
+            // de mivel batch jön, stabilabb finalizenál parse-olni.
         }
     }
 
@@ -188,6 +183,7 @@ public class TcpClientLogic : IDisposable
                     lastRawMessage = string.Empty;
                     currentBatch.Clear();
                     // incomingBuffer.Clear(); // NE töröld, lehet késleltetett válasz
+                    lastChunkUtc = DateTime.UtcNow;
                 }
             }
 
@@ -200,11 +196,9 @@ public class TcpClientLogic : IDisposable
 
             if (message.Equals("LOFF", StringComparison.OrdinalIgnoreCase))
             {
-                // .NET 4.0 / régebbi: nincs Task.Run -> ThreadPool
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    Thread.Sleep(800); // állítható
-                    FinalizeCaptureAndExport();
+                    WaitForReaderIdleThenFinalize(idleMs: 400, maxWaitMs: 5000, pollMs: 100);
                 });
             }
         }
@@ -217,6 +211,32 @@ public class TcpClientLogic : IDisposable
         }
     }
 
+    private void WaitForReaderIdleThenFinalize(int idleMs, int maxWaitMs, int pollMs)
+    {
+        DateTime start = DateTime.UtcNow;
+
+        while (true)
+        {
+            Thread.Sleep(pollMs);
+
+            DateTime last;
+            lock (sync) last = lastChunkUtc;
+
+            if (last != DateTime.MinValue &&
+                (DateTime.UtcNow - last).TotalMilliseconds >= idleMs)
+            {
+                break;
+            }
+
+            if ((DateTime.UtcNow - start).TotalMilliseconds >= maxWaitMs)
+            {
+                break;
+            }
+        }
+
+        FinalizeCaptureAndExport();
+    }
+
     private void FinalizeCaptureAndExport()
     {
         List<ReaderScanRecord> snapshot;
@@ -226,6 +246,7 @@ public class TcpClientLogic : IDisposable
         {
             captureActive = false;
 
+            // currentBatch most nem élőben töltődik, de hagyom kompatibilitás miatt
             snapshot = new List<ReaderScanRecord>(currentBatch);
 
             rawBuffer = incomingBuffer.ToString();
@@ -235,11 +256,10 @@ public class TcpClientLogic : IDisposable
             {
                 var fromBuffer = ParseReaderResponse(rawBuffer);
                 if (fromBuffer.Count > 0)
-                {
                     snapshot.AddRange(fromBuffer);
-                }
             }
 
+            // Dedupe DM alapján (Code = DM)
             snapshot = DeduplicateByCode(snapshot);
             qty = snapshot.Count;
 
@@ -251,15 +271,11 @@ public class TcpClientLogic : IDisposable
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), qty));
 
         if (snapshot.Count > 0)
-        {
             ExportScanOutput(snapshot);
-        }
         else
-        {
             SafeUiMessage(string.Format("{0} No barcode captured.",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.DarkOrange);
-        }
     }
 
     private List<ReaderScanRecord> DeduplicateByCode(List<ReaderScanRecord> rows)
@@ -274,9 +290,7 @@ public class TcpClientLogic : IDisposable
             if (code.Length == 0) continue;
 
             if (seen.Add(code))
-            {
                 outList.Add(r);
-            }
         }
         return outList;
     }
@@ -309,7 +323,6 @@ public class TcpClientLogic : IDisposable
 
     public bool ConnectToMysql()
     {
-        // feltöltéshez a legutolsó raw dumpból parse-olunk
         List<ReaderScanRecord> snapshot;
         lock (sync)
         {
@@ -337,7 +350,6 @@ public class TcpClientLogic : IDisposable
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.Green);
 
-            // public helyett legyen private/internal -> megszűnik az accessibility hiba
             UploadToMysqlInternal(snapshot);
             return true;
         }
@@ -359,7 +371,6 @@ public class TcpClientLogic : IDisposable
         }
     }
 
-    // CS0051 fix: ne legyen public, mert ReaderScanRecord private nested typea
     private void UploadToMysqlInternal(List<ReaderScanRecord> rows)
     {
         if (dbConnection == null || dbConnection.State != System.Data.ConnectionState.Open)
@@ -372,7 +383,8 @@ public class TcpClientLogic : IDisposable
 
         try
         {
-            const string sql = "INSERT INTO scans (data, image,processed) VALUES (@data, @image,0)";
+            // data = DM (1618...), image = teljes qr_raw (opc,...,dm)
+            const string sql = "INSERT INTO scans (data, qr_raw, processed) VALUES (@data, @image, 0)";
             using (var cmd = new MySqlCommand(sql, dbConnection))
             {
                 var pData = cmd.Parameters.Add("@data", MySqlDbType.VarChar);
@@ -383,10 +395,11 @@ public class TcpClientLogic : IDisposable
                 foreach (var row in rows)
                 {
                     if (row == null) continue;
-                    var code = (row.Code ?? string.Empty).Trim();
-                    if (code.Length == 0) continue;
 
-                    pData.Value = code;
+                    var dm = (row.Code ?? string.Empty).Trim();
+                    if (dm.Length == 0) continue;
+
+                    pData.Value = dm;
                     pImg.Value = (row.Image ?? string.Empty);
 
                     cmd.ExecuteNonQuery();
@@ -451,95 +464,97 @@ public class TcpClientLogic : IDisposable
 
     // ========= PARSE =========
 
-    private ReaderScanRecord ParseRow(string row)
-    {
-        if (string.IsNullOrWhiteSpace(row)) return null;
-
-        string codePart = row;
-        string imagePart = string.Empty;
-
-        if (row.Contains(";"))
-        {
-            var values = row.Split(';');
-            codePart = values.Length > 0 ? values[0] : row;
-            imagePart = values.Length > 1 ? values[1] : string.Empty;
-        }
-
-        string code = ExtractFullCode(codePart);
-        if (string.IsNullOrWhiteSpace(code)) return null;
-
-        return new ReaderScanRecord
-        {
-            Code = code,
-            Image = imagePart == null ? string.Empty : imagePart.Trim(),
-            Timestamp = DateTime.Now
-        };
-    }
-
-    private string ExtractFullCode(string input)
-    {
-        if (string.IsNullOrWhiteSpace(input)) return string.Empty;
-
-        string s = input.Trim();
-        if (s.Equals("OK", StringComparison.OrdinalIgnoreCase)) return string.Empty;
-        if (s.Equals("01", StringComparison.OrdinalIgnoreCase)) return string.Empty;
-
-        return s;
-    }
-
+    /// <summary>
+    /// Nálad a rekord formátum biztos:
+    /// "OPC(10 digit),TYPE...,EXTRA,DM(16-32 digit)"
+    /// Több rekord jöhet egy sorban batchként: ...,DM,OPC,...,DM,OPC,...,DM
+    /// Terminator: CR (0D)
+    /// </summary>
     private List<ReaderScanRecord> ParseReaderResponse(string response)
     {
         var result = new List<ReaderScanRecord>();
         if (string.IsNullOrWhiteSpace(response)) return result;
 
         int noiseIdx = response.IndexOf("/webscripts/", StringComparison.OrdinalIgnoreCase);
-        if (noiseIdx >= 0)
-        {
-            response = response.Substring(0, noiseIdx);
-        }
+        if (noiseIdx >= 0) response = response.Substring(0, noiseIdx);
 
-        if (response.Contains("$"))
+        response = response.Trim();
+
+        // ha CR van, akkor több "line"-t kezelünk
+        if (response.Contains("\r"))
         {
-            string[] rows = response.Split(new[] { '$' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (string rawRow in rows)
+            string[] lines = response.Split(new[] { '\r' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var ln in lines)
             {
-                var rec = ParseRow(rawRow.Trim());
-                if (rec != null) result.Add(rec);
+                var one = ParseKeyenceBatchLine(ln.Trim());
+                if (one.Count > 0) result.AddRange(one);
             }
             return result;
         }
 
-        MatchCollection m = QrStartRegex.Matches(response);
+        // batch egy sorban
+        result.AddRange(ParseKeyenceBatchLine(response));
+        return result;
+    }
 
-        if (m.Count == 0)
+    private List<ReaderScanRecord> ParseKeyenceBatchLine(string line)
+    {
+        var outList = new List<ReaderScanRecord>();
+        if (string.IsNullOrWhiteSpace(line)) return outList;
+
+        // tokenizálás vessző alapján
+        if (!line.Contains(",")) return outList;
+
+        string[] raw = line.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+
+        // trim + üres kiszűrés
+        List<string> tokens = new List<string>(raw.Length);
+        for (int i = 0; i < raw.Length; i++)
         {
-            var one = response.Trim().Trim(',');
-            if (!string.IsNullOrWhiteSpace(one))
-            {
-                result.Add(new ReaderScanRecord { Code = one, Image = "", Timestamp = DateTime.Now });
-            }
-            return result;
+            string x = (raw[i] ?? "").Trim();
+            if (x.Length > 0) tokens.Add(x);
         }
 
-        for (int i = 0; i < m.Count; i++)
+        if (tokens.Count < 4) return outList;
+
+        // 4-es blokkok: [OPC][TYPE][EXTRA][DM]
+        // és ismétlődik batchben
+        // Biztos pont: tokens[i] OPC (10 digit), tokens[i+3] DM (16-32 digit)
+        for (int i = 0; i + 3 < tokens.Count;)
         {
-            int start = m[i].Index;
-            int end = (i + 1 < m.Count) ? m[i + 1].Index : response.Length;
-
-            string piece = response.Substring(start, end - start).Trim();
-            piece = piece.Trim().Trim(',');
-
-            if (!Regex.IsMatch(piece, @"^\d{10}")) continue;
-
-            result.Add(new ReaderScanRecord
+            string opc = tokens[i];
+            if (!OpcRegex.IsMatch(opc))
             {
-                Code = piece,
-                Image = string.Empty,
+                // elcsúszás esetén keressünk következő OPC-t
+                i++;
+                continue;
+            }
+
+            string type = tokens[i + 1];
+            string extra = tokens[i + 2];
+            string dm = tokens[i + 3];
+
+            if (!DmRegex.IsMatch(dm))
+            {
+                // ha nem DM, akkor csúszás, menjünk tovább 1 tokennel
+                i++;
+                continue;
+            }
+
+            // qr_raw: pontosan olyan formában, ahogy a DB-be szeretnéd
+            string qrRaw = opc + "," + type + "," + extra + "," + dm;
+
+            outList.Add(new ReaderScanRecord
+            {
+                Code = dm,       // data oszlop (DM)
+                Image = qrRaw,   // image oszlop (teljes qr_raw)
                 Timestamp = DateTime.Now
             });
+
+            i += 4;
         }
 
-        return result;
+        return outList;
     }
 
     // ========= EXPORT =========
@@ -570,11 +585,12 @@ public class TcpClientLogic : IDisposable
     private IEnumerable<string> BuildCsvLines(IEnumerable<ReaderScanRecord> rows)
     {
         List<string> lines = new List<string>();
-        lines.Add("data");
+        lines.Add("data;qr_raw");
 
         foreach (ReaderScanRecord row in rows)
         {
-            lines.Add(EscapeCsvValue(row.Code));
+            // DM ; qr_raw
+            lines.Add(EscapeCsvValue(row.Code) + ";" + EscapeCsvValue(row.Image));
         }
 
         return lines;
@@ -584,7 +600,7 @@ public class TcpClientLogic : IDisposable
     {
         if (value == null) return string.Empty;
 
-        if (value.Contains(",") || value.Contains("\"") || value.Contains("\n") || value.Contains("\r"))
+        if (value.Contains(",") || value.Contains("\"") || value.Contains("\n") || value.Contains("\r") || value.Contains(";"))
         {
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         }
@@ -601,13 +617,16 @@ public class TcpClientLogic : IDisposable
         foreach (ReaderScanRecord row in rows)
         {
             if (row == null) continue;
-            string code = (row.Code ?? string.Empty).Trim();
-            if (code.Length == 0) continue;
+
+            string dm = (row.Code ?? string.Empty).Trim();
+            if (dm.Length == 0) continue;
 
             if (!first) sb.AppendLine(",");
 
             sb.Append("  {\"data\":\"")
-              .Append(JsonEscape(code))
+              .Append(JsonEscape(dm))
+              .Append("\",\"qr_raw\":\"")
+              .Append(JsonEscape(row.Image ?? string.Empty))
               .Append("\"}");
 
             first = false;
@@ -678,8 +697,8 @@ public class TcpClientLogic : IDisposable
 
     private class ReaderScanRecord
     {
-        public string Code { get; set; }
-        public string Image { get; set; }
+        public string Code { get; set; }     // DM
+        public string Image { get; set; }    // qr_raw
         public DateTime Timestamp { get; set; }
     }
 }
