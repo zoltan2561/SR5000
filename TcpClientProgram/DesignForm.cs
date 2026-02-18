@@ -137,10 +137,11 @@ namespace TcpClientProgram
 
         private void buttonShoot_Click(object sender, EventArgs e)
         {
-            if (string.IsNullOrWhiteSpace(CurrentShelfCode))
+            if (string.IsNullOrWhiteSpace(CurrentShelfCode) || CurrentShelfCode == "0")
             {
                 MessageBox.Show("Kérlek előbb olvasd be a polc számát a szkennelés előtt!", "Hiányzó polc", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 shelfCodeTextBox.Focus();
+                shelfCodeTextBox.SelectAll();
                 return;
             }
 
@@ -258,9 +259,10 @@ namespace TcpClientProgram
                     }
                 }
 
-                buttonShoot.BackColor = SystemColors.ButtonFace;
+                buttonShoot.BackColor = Color.FromArgb(59, 130, 246);
                 progressBar.Close();
                 progressBar.SetProgressBarValue(0);
+                ResetShelfCodeAfterScan();
                 // Perform any actions you want when the countdown is finished
 
                 // You can add more logic here based on your requirements
@@ -721,7 +723,8 @@ namespace TcpClientProgram
             SetLanguageText();
             InitializeResponsiveLayout();
             InitializeShelfControls();
-            CurrentShelfCode = string.Empty;
+            ApplyModernUiTheme();
+            ResetShelfCodeAfterScan();
             if (this.autoupload == 1)
             {
                 autouploadToolStripMenuItem.Text = $"{rm.GetString("setting_autoupload")} [{rm.GetString("on")}]";
@@ -793,6 +796,49 @@ namespace TcpClientProgram
             Controls.Add(shelfCodeTextBox);
             shelfCodeTextBox.BringToFront();
             shelfCodeLabel.BringToFront();
+        }
+
+        private void ApplyModernUiTheme()
+        {
+            BackColor = Color.FromArgb(245, 247, 250);
+            Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+
+            outputBox.BackColor = Color.White;
+            outputBox.BorderStyle = BorderStyle.FixedSingle;
+
+            StyleActionButton(buttonShoot, Color.FromArgb(59, 130, 246), Color.White);
+            StyleActionButton(buttonUpload, Color.FromArgb(16, 185, 129), Color.White);
+            StyleActionButton(buttonConnect, Color.FromArgb(14, 165, 233), Color.White);
+            StyleActionButton(buttonDisconnect, Color.FromArgb(239, 68, 68), Color.White);
+            StyleActionButton(buttonClear, Color.FromArgb(107, 114, 128), Color.White);
+            StyleActionButton(buttonSend, Color.FromArgb(79, 70, 229), Color.White);
+
+            shelfCodeLabel.ForeColor = Color.FromArgb(31, 41, 55);
+            shelfCodeLabel.Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold, GraphicsUnit.Point);
+
+            shelfCodeTextBox.BorderStyle = BorderStyle.FixedSingle;
+            shelfCodeTextBox.BackColor = Color.White;
+            shelfCodeTextBox.Font = new Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point);
+
+            labelTimer.ForeColor = Color.FromArgb(55, 65, 81);
+            labelTimer.Font = new Font("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
+        }
+
+        private void StyleActionButton(Button button, Color backColor, Color foreColor)
+        {
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = 0;
+            button.BackColor = backColor;
+            button.ForeColor = foreColor;
+            button.Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold, GraphicsUnit.Point);
+            button.Height = Math.Max(button.Height, 34);
+        }
+
+        private void ResetShelfCodeAfterScan()
+        {
+            CurrentShelfCode = "0";
+            shelfCodeTextBox.Text = "0";
+            shelfCodeTextBox.SelectionStart = shelfCodeTextBox.Text.Length;
         }
 
         private void Kill()
