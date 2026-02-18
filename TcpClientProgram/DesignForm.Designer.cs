@@ -150,10 +150,10 @@
             this.buttonShoot.Anchor = System.Windows.Forms.AnchorStyles.None;
             this.buttonShoot.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink;
             this.buttonShoot.Font = new System.Drawing.Font("Microsoft Sans Serif", 14.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(238)));
-            this.buttonShoot.Location = new System.Drawing.Point(3, 3);
+            this.buttonShoot.Location = new System.Drawing.Point(2, 3);
             this.buttonShoot.Margin = new System.Windows.Forms.Padding(2, 3, 2, 3);
             this.buttonShoot.Name = "buttonShoot";
-            this.buttonShoot.Size = new System.Drawing.Size(155, 31);
+            this.buttonShoot.Size = new System.Drawing.Size(158, 31);
             this.buttonShoot.TabIndex = 6;
             this.buttonShoot.Text = "Shoot";
             this.buttonShoot.UseVisualStyleBackColor = true;
@@ -274,7 +274,7 @@
             this.englishToolStripMenuItem.CheckState = System.Windows.Forms.CheckState.Checked;
             this.englishToolStripMenuItem.Image = global::TcpClientProgram.Properties.Resources.MicrosoftTeams_image;
             this.englishToolStripMenuItem.Name = "englishToolStripMenuItem";
-            this.englishToolStripMenuItem.Size = new System.Drawing.Size(115, 22);
+            this.englishToolStripMenuItem.Size = new System.Drawing.Size(116, 22);
             this.englishToolStripMenuItem.Text = "English";
             this.englishToolStripMenuItem.Click += new System.EventHandler(this.englishToolStripMenuItem_Click_1);
             // 
@@ -282,7 +282,7 @@
             // 
             this.magyarToolStripMenuItem.Image = global::TcpClientProgram.Properties.Resources.MicrosoftTeams_image__3_;
             this.magyarToolStripMenuItem.Name = "magyarToolStripMenuItem";
-            this.magyarToolStripMenuItem.Size = new System.Drawing.Size(115, 22);
+            this.magyarToolStripMenuItem.Size = new System.Drawing.Size(116, 22);
             this.magyarToolStripMenuItem.Text = "Magyar";
             this.magyarToolStripMenuItem.Click += new System.EventHandler(this.magyarToolStripMenuItem_Click);
             // 
@@ -290,7 +290,7 @@
             // 
             this.แบบไทยToolStripMenuItem.Image = global::TcpClientProgram.Properties.Resources.MicrosoftTeams_image__1_;
             this.แบบไทยToolStripMenuItem.Name = "แบบไทยToolStripMenuItem";
-            this.แบบไทยToolStripMenuItem.Size = new System.Drawing.Size(115, 22);
+            this.แบบไทยToolStripMenuItem.Size = new System.Drawing.Size(116, 22);
             this.แบบไทยToolStripMenuItem.Text = "แบบไทย";
             this.แบบไทยToolStripMenuItem.Click += new System.EventHandler(this.แบบไทยToolStripMenuItem_Click_1);
             // 
@@ -298,7 +298,7 @@
             // 
             this.tagalogToolStripMenuItem.Image = global::TcpClientProgram.Properties.Resources.MicrosoftTeams_image__2_;
             this.tagalogToolStripMenuItem.Name = "tagalogToolStripMenuItem";
-            this.tagalogToolStripMenuItem.Size = new System.Drawing.Size(115, 22);
+            this.tagalogToolStripMenuItem.Size = new System.Drawing.Size(116, 22);
             this.tagalogToolStripMenuItem.Text = "Tagalog";
             this.tagalogToolStripMenuItem.Click += new System.EventHandler(this.tagalogToolStripMenuItem_Click_1);
             // 

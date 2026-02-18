@@ -270,9 +270,10 @@ public class TcpClientLogic : IDisposable
         SafeUiMessage(string.Format("{0} Total read barcode QTY: {1}",
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), qty));
 
-        if (snapshot.Count > 0)
-            ExportScanOutput(snapshot);
-        else
+        if (snapshot.Count <= 0)
+         //   ExportScanOutput(snapshot);
+                
+       
             SafeUiMessage(string.Format("{0} No barcode captured.",
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 System.Drawing.Color.DarkOrange);
@@ -559,8 +560,9 @@ public class TcpClientLogic : IDisposable
         return outList;
     }
 
-    // ========= EXPORT =========
+    // ========= EXPORT ========= egyelőre kikommentelem elég csak db save
 
+    /*
     private void ExportScanOutput(List<ReaderScanRecord> rows)
     {
         string exportFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "output");
@@ -583,7 +585,7 @@ public class TcpClientLogic : IDisposable
                 Path.GetFileName(jsonPath)),
             System.Drawing.Color.DarkGreen);
     }
-
+    */
     private IEnumerable<string> BuildCsvLines(IEnumerable<ReaderScanRecord> rows)
     {
         List<string> lines = new List<string>();
