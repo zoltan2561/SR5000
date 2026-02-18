@@ -384,11 +384,12 @@ public class TcpClientLogic : IDisposable
         try
         {
             // data = DM (1618...), image = teljes qr_raw (opc,...,dm)
-            const string sql = "INSERT INTO scans (data, qr_raw, processed) VALUES (@data, @image, 0)";
+            const string sql = "INSERT INTO scans (data, qr_raw, polc, processed) VALUES (@data, @image, @shelf, 0)";
             using (var cmd = new MySqlCommand(sql, dbConnection))
             {
                 var pData = cmd.Parameters.Add("@data", MySqlDbType.VarChar);
                 var pImg = cmd.Parameters.Add("@image", MySqlDbType.VarChar);
+                var pShelf = cmd.Parameters.Add("@shelf", MySqlDbType.VarChar);
 
                 int inserted = 0;
 
@@ -401,6 +402,7 @@ public class TcpClientLogic : IDisposable
 
                     pData.Value = dm;
                     pImg.Value = (row.Image ?? string.Empty);
+                    pShelf.Value = (designForm.CurrentShelfCode ?? string.Empty).Trim();
 
                     cmd.ExecuteNonQuery();
                     inserted++;
