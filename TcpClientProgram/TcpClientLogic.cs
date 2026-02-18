@@ -342,7 +342,18 @@ public class TcpClientLogic : IDisposable
         SafeUiMessage(string.Format("{0} Attempting mysql connection",
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
 
-        dbConnection = new MySqlConnection("server=db3;user id=scripts;password=hmhuscripts;database=keyence;");
+        var connectionStringBuilder = new MySqlConnectionStringBuilder
+        {
+            Server = "db8",
+            Port = 3306,
+            Database = "keyence",
+            UserID = "scripts",
+            Password = "hmhuscripts",
+            SslMode = MySqlSslMode.None,
+            ConnectionTimeout = 10
+        };
+
+        dbConnection = new MySqlConnection(connectionStringBuilder.ConnectionString);
 
         try
         {
@@ -357,8 +368,12 @@ public class TcpClientLogic : IDisposable
         catch (Exception ex)
         {
             Logger.Error(ex);
+            var errorMessage = ex.InnerException != null
+                ? string.Format("{0} (Inner: {1})", ex.Message, ex.InnerException.Message)
+                : ex.Message;
+
             SafeUiMessage(string.Format("{0} Error connecting to mysql database: {1}",
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message),
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), errorMessage),
                 System.Drawing.Color.Red);
             return false;
         }
