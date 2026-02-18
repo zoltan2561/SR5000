@@ -39,6 +39,9 @@ namespace TcpClientProgram
         private int autoupload;
         private int blockcommand;
         private string language;
+        private string currentShelfCode;
+        private Label shelfCodeLabel;
+        private TextBox shelfCodeTextBox;
         public static ResourceManager rm;
         public bool disconnect;
         public string Ip { get => ip; set => ip = value; }
@@ -50,6 +53,7 @@ namespace TcpClientProgram
         public int BlockCommand { get => blockcommand; set => blockcommand = value; }
         public bool Disconnect { get => disconnect; set => disconnect = value; }
         public string Langauge { get => language; set => language = value; }
+        public string CurrentShelfCode { get => currentShelfCode; set => currentShelfCode = value; }
         
 
 
@@ -133,6 +137,13 @@ namespace TcpClientProgram
 
         private void buttonShoot_Click(object sender, EventArgs e)
         {
+            if (string.IsNullOrWhiteSpace(CurrentShelfCode))
+            {
+                MessageBox.Show("Kérlek előbb olvasd be a polc számát a szkennelés előtt!", "Hiányzó polc", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                shelfCodeTextBox.Focus();
+                return;
+            }
+
             //SetTimer(Timer);
             buttonShoot.Enabled = false;
             buttonShoot.BackColor = Color.Gold;
@@ -708,6 +719,9 @@ namespace TcpClientProgram
             buttonDisconnect.Enabled = false;
             liveImageToolStripMenuItem.Enabled = false;
             SetLanguageText();
+            InitializeResponsiveLayout();
+            InitializeShelfControls();
+            CurrentShelfCode = string.Empty;
             if (this.autoupload == 1)
             {
                 autouploadToolStripMenuItem.Text = $"{rm.GetString("setting_autoupload")} [{rm.GetString("on")}]";
@@ -734,6 +748,51 @@ namespace TcpClientProgram
                 buttonSend.Enabled = true;
                 directCommandToolStripMenuItem.Checked = true;
             }
+        }
+
+
+        private void InitializeResponsiveLayout()
+        {
+            MinimumSize = new Size(760, 480);
+
+            tableLayoutPanel2.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            tableLayoutPanel1.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+
+            buttonShoot.Dock = DockStyle.Fill;
+            buttonUpload.Dock = DockStyle.Fill;
+            buttonClear.Dock = DockStyle.Fill;
+            buttonConnect.Dock = DockStyle.Fill;
+            buttonDisconnect.Dock = DockStyle.Fill;
+            buttonSend.Dock = DockStyle.Fill;
+
+            outputBox.Location = new Point(outputBox.Location.X, 90);
+            outputBox.Size = new Size(outputBox.Size.Width, outputBox.Size.Height - 30);
+            tableLayoutPanel2.Location = new Point(tableLayoutPanel2.Location.X, 57);
+        }
+
+        private void InitializeShelfControls()
+        {
+            shelfCodeLabel = new Label
+            {
+                AutoSize = true,
+                Font = new Font("Microsoft Sans Serif", 9.75F, FontStyle.Bold),
+                Text = "Polc szám:",
+                Location = new Point(12, 33)
+            };
+
+            shelfCodeTextBox = new TextBox
+            {
+                Font = new Font("Microsoft Sans Serif", 9.75F, FontStyle.Regular),
+                Location = new Point(108, 30),
+                Width = ClientSize.Width - 120,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            shelfCodeTextBox.TextChanged += shelfCodeTextBox_TextChanged;
+
+            Controls.Add(shelfCodeLabel);
+            Controls.Add(shelfCodeTextBox);
+            shelfCodeTextBox.BringToFront();
+            shelfCodeLabel.BringToFront();
         }
 
         private void Kill()
@@ -851,6 +910,11 @@ namespace TcpClientProgram
         private void menuStrip1_ItemClicked(object sender, ToolStripItemClickedEventArgs e)
         {
 
+        }
+
+        private void shelfCodeTextBox_TextChanged(object sender, EventArgs e)
+        {
+            CurrentShelfCode = shelfCodeTextBox.Text.Trim();
         }
     }
 }
