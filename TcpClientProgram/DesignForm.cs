@@ -751,6 +751,7 @@ namespace TcpClientProgram
             InitializeShelfControls();
             ApplyModernUiTheme();
             ResetShelfCodeAfterScan();
+            shelfCodeTextBox.Focus();
             if (this.autoupload == 1)
             {
                 autouploadToolStripMenuItem.Text = $"{rm.GetString("setting_autoupload")} [{rm.GetString("on")}]";
@@ -931,9 +932,20 @@ namespace TcpClientProgram
 
         private void ResetShelfCodeAfterScan()
         {
-            CurrentShelfCode = "0";
-            shelfCodeTextBox.Text = "0";
-            shelfCodeTextBox.SelectionStart = shelfCodeTextBox.Text.Length;
+            CurrentShelfCode = string.Empty;
+            shelfCodeTextBox.Text = string.Empty;
+            shelfCodeTextBox.Focus();
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.F9 && buttonShoot.Enabled)
+            {
+                buttonShoot.PerformClick();
+                return true;
+            }
+
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         private void Kill()
