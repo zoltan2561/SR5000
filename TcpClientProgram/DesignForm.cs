@@ -78,17 +78,39 @@ namespace TcpClientProgram
         {
             if (outputBox.InvokeRequired)
             {
-                Invoke(new Action(() => DisplayMessage(message, color)));
+                BeginInvoke(new Action(() => DisplayMessage(message, color)));
             }
             else
             {
                 outputBox.AppendText(message + Environment.NewLine, color);
+                TrimOutputBufferIfNeeded();
             }
+        }
+
+        private void TrimOutputBufferIfNeeded()
+        {
+            const int maxLines = 2000;
+            const int linesToKeepWhenTrimmed = 1500;
+
+            if (outputBox.Lines.Length <= maxLines)
+            {
+                return;
+            }
+
+            string[] lines = outputBox.Lines;
+            int startIndex = Math.Max(0, lines.Length - linesToKeepWhenTrimmed);
+            string[] trimmed = new string[lines.Length - startIndex];
+            Array.Copy(lines, startIndex, trimmed, 0, trimmed.Length);
+
+            outputBox.Lines = trimmed;
+            outputBox.SelectionStart = outputBox.TextLength;
+            outputBox.ScrollToCaret();
         }
 
 
         private void DesignForm_FormClosing(object sender, FormClosingEventArgs e)
         {
+            StopAndDisposeTimers();
             tcpClientLogic.StopClient();
 
         }
@@ -166,35 +188,20 @@ namespace TcpClientProgram
 
         private void SetTimer(int milliseconds)
         {
-            // Initialize the Timer
-            countdownTimer = new System.Windows.Forms.Timer();
-            countdownTimer.Tick += async (sender, e) => await CountdownTimer_Tick(sender, e);
-
-            // Set the remaining milliseconds
             remainingMilliseconds = milliseconds;
-
-            countdownTimer.Interval = 1000;
-
-            // Start the timer
+            countdownTimer.Stop();
             countdownTimer.Start();
         }
 
         private void SetProgressTimer(int milliseconds)
         {
-            // Initialize the Timer
-            progressBarTimer = new System.Windows.Forms.Timer();
-            progressBarTimer.Tick += async (sender, e) => await progressBarTimer_Tick(sender, e);
-
-            // Set the remaining milliseconds
             remainingMillisecondsProgressBar = milliseconds;
-
-            progressBarTimer.Interval = timer / 100;
-
-            // Start the timer
+            progressBarTimer.Interval = Math.Max(1, timer / 100);
+            progressBarTimer.Stop();
             progressBarTimer.Start();
         }
 
-        private async Task progressBarTimer_Tick(object sender, EventArgs e)
+        private void progressBarTimer_Tick(object sender, EventArgs e)
         {
             // Update the remaining milliseconds
             remainingMillisecondsProgressBar -= progressBarTimer.Interval;
@@ -211,10 +218,9 @@ namespace TcpClientProgram
                 //UpdateDisplayProgressBar();
             }
 
-            await TaskEx.Delay(0);
         }
 
-        private async Task CountdownTimer_Tick(object sender, EventArgs e)
+        private async void CountdownTimer_Tick(object sender, EventArgs e)
         {
             // Update the remaining milliseconds
             remainingMilliseconds -= countdownTimer.Interval;
@@ -275,7 +281,6 @@ namespace TcpClientProgram
                 // current - remainingMilliseconds
             }
 
-            await TaskEx.Delay(0);
         }
 
         private void UpdateDisplay()
@@ -715,6 +720,7 @@ namespace TcpClientProgram
             backgroundWorker = new BackgroundWorker();
             backgroundWorker.WorkerReportsProgress = true;
             login = new Login();
+            InitializeTimers();
             buttonShoot.Enabled = false;
             buttonSend.Enabled = false;
             buttonUpload.Enabled = false;
@@ -750,6 +756,34 @@ namespace TcpClientProgram
                 inputBox.Enabled = true;
                 buttonSend.Enabled = true;
                 directCommandToolStripMenuItem.Checked = true;
+            }
+        }
+
+        private void InitializeTimers()
+        {
+            countdownTimer = new System.Windows.Forms.Timer();
+            countdownTimer.Interval = 1000;
+            countdownTimer.Tick += CountdownTimer_Tick;
+
+            progressBarTimer = new System.Windows.Forms.Timer();
+            progressBarTimer.Interval = Math.Max(1, timer / 100);
+            progressBarTimer.Tick += progressBarTimer_Tick;
+        }
+
+        private void StopAndDisposeTimers()
+        {
+            if (countdownTimer != null)
+            {
+                countdownTimer.Stop();
+                countdownTimer.Dispose();
+                countdownTimer = null;
+            }
+
+            if (progressBarTimer != null)
+            {
+                progressBarTimer.Stop();
+                progressBarTimer.Dispose();
+                progressBarTimer = null;
             }
         }
 
@@ -843,6 +877,7 @@ namespace TcpClientProgram
 
         private void Kill()
         {
+            StopAndDisposeTimers();
             tcpClientLogic.StopClient();
             buttonShoot.Enabled = false;
             buttonSend.Enabled = false;
