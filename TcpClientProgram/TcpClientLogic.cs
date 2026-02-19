@@ -33,6 +33,7 @@ public class TcpClientLogic : IDisposable
 
     private readonly StringBuilder incomingBuffer = new StringBuilder();
     private readonly List<ReaderScanRecord> currentBatch = new List<ReaderScanRecord>();
+    private List<ReaderScanRecord> latestSnapshot = new List<ReaderScanRecord>();
 
     // LOFF után tail beérkezéshez (idle-wait)
     private DateTime lastChunkUtc = DateTime.MinValue;
@@ -262,6 +263,7 @@ public class TcpClientLogic : IDisposable
             // Dedupe DM alapján (Code = DM)
             snapshot = DeduplicateByCode(snapshot);
             qty = snapshot.Count;
+            latestSnapshot = new List<ReaderScanRecord>(snapshot);
 
             incomingBuffer.Clear();
             currentBatch.Clear();
@@ -327,8 +329,7 @@ public class TcpClientLogic : IDisposable
         List<ReaderScanRecord> snapshot;
         lock (sync)
         {
-            snapshot = ParseReaderResponse(lastRawMessage);
-            snapshot = DeduplicateByCode(snapshot);
+            snapshot = new List<ReaderScanRecord>(latestSnapshot);
         }
 
         if (snapshot == null || snapshot.Count == 0)
@@ -384,11 +385,11 @@ public class TcpClientLogic : IDisposable
 
         try
         {
-            // data = DM (1618...), image = teljes qr_raw (opc,...,dm)
-            const string sql = "INSERT INTO scans (data, qr_raw, polc, processed) VALUES (@data, @image, @shelf, 0)";
+            // opc = OPC (10 digit), qr_raw = teljes qr string
+            const string sql = "INSERT INTO scans (opc, qr_raw, polc, processed) VALUES (@opc, @image, @shelf, 0)";
             using (var cmd = new MySqlCommand(sql, dbConnection))
             {
-                var pData = cmd.Parameters.Add("@data", MySqlDbType.VarChar);
+                var pOpc = cmd.Parameters.Add("@opc", MySqlDbType.VarChar);
                 var pImg = cmd.Parameters.Add("@image", MySqlDbType.VarChar);
                 var pShelf = cmd.Parameters.Add("@shelf", MySqlDbType.VarChar);
 
@@ -398,10 +399,10 @@ public class TcpClientLogic : IDisposable
                 {
                     if (row == null) continue;
 
-                    var dm = (row.Code ?? string.Empty).Trim();
-                    if (dm.Length == 0) continue;
+                    var opc = (row.Opc ?? string.Empty).Trim();
+                    if (opc.Length == 0) continue;
 
-                    pData.Value = dm;
+                    pOpc.Value = opc;
                     pImg.Value = (row.Image ?? string.Empty);
                     pShelf.Value = (designForm.CurrentShelfCode ?? string.Empty).Trim();
 
@@ -549,7 +550,8 @@ public class TcpClientLogic : IDisposable
 
             outList.Add(new ReaderScanRecord
             {
-                Code = dm,       // data oszlop (DM)
+                Opc = opc,       // opc oszlop (OPC)
+                Code = dm,       // DM belső ellenőrzéshez
                 Image = qrRaw,   // image oszlop (teljes qr_raw)
                 Timestamp = DateTime.Now
             });
@@ -589,12 +591,11 @@ public class TcpClientLogic : IDisposable
     private IEnumerable<string> BuildCsvLines(IEnumerable<ReaderScanRecord> rows)
     {
         List<string> lines = new List<string>();
-        lines.Add("data;qr_raw");
+        lines.Add("opc;qr_raw");
 
         foreach (ReaderScanRecord row in rows)
         {
-            // DM ; qr_raw
-            lines.Add(EscapeCsvValue(row.Code) + ";" + EscapeCsvValue(row.Image));
+            lines.Add(EscapeCsvValue(row.Opc) + ";" + EscapeCsvValue(row.Image));
         }
 
         return lines;
@@ -622,13 +623,13 @@ public class TcpClientLogic : IDisposable
         {
             if (row == null) continue;
 
-            string dm = (row.Code ?? string.Empty).Trim();
-            if (dm.Length == 0) continue;
+            string opc = (row.Opc ?? string.Empty).Trim();
+            if (opc.Length == 0) continue;
 
             if (!first) sb.AppendLine(",");
 
-            sb.Append("  {\"data\":\"")
-              .Append(JsonEscape(dm))
+            sb.Append("  {\"opc\":\"")
+              .Append(JsonEscape(opc))
               .Append("\",\"qr_raw\":\"")
               .Append(JsonEscape(row.Image ?? string.Empty))
               .Append("\"}");
@@ -701,6 +702,7 @@ public class TcpClientLogic : IDisposable
 
     private class ReaderScanRecord
     {
+        public string Opc { get; set; }      // OPC
         public string Code { get; set; }     // DM
         public string Image { get; set; }    // qr_raw
         public DateTime Timestamp { get; set; }

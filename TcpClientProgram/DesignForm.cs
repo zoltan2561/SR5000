@@ -83,6 +83,7 @@ namespace TcpClientProgram
             else
             {
                 outputBox.AppendText(message + Environment.NewLine, color);
+                TrimOutputBuffer(maxLines: 2000);
             }
         }
 
@@ -122,6 +123,27 @@ namespace TcpClientProgram
         {
             outputBox.SelectionStart = outputBox.Text.Length;
             outputBox.ScrollToCaret();
+        }
+
+        private void TrimOutputBuffer(int maxLines)
+        {
+            if (outputBox.Lines.Length <= maxLines) return;
+
+            int removeLines = outputBox.Lines.Length - maxLines;
+            int removeIndex = 0;
+
+            for (int i = 0; i < removeLines; i++)
+            {
+                int next = outputBox.Text.IndexOf(Environment.NewLine, removeIndex, StringComparison.Ordinal);
+                if (next < 0) break;
+                removeIndex = next + Environment.NewLine.Length;
+            }
+
+            if (removeIndex > 0 && removeIndex < outputBox.TextLength)
+            {
+                outputBox.Select(0, removeIndex);
+                outputBox.SelectedText = string.Empty;
+            }
         }
 
         private void uploadButton_Click(object sender, EventArgs e)
@@ -358,6 +380,7 @@ namespace TcpClientProgram
         private void GetLanguage()
         {
             String line;
+            this.language = "en";
             try
             {
                 StreamReader sr = new StreamReader("settings.ini");
@@ -412,6 +435,7 @@ namespace TcpClientProgram
         private void GetScanCount()
         {
             String line;
+            this.scancount = "40";
             try
             {
                 StreamReader sr = new StreamReader("settings.ini");
@@ -487,6 +511,7 @@ namespace TcpClientProgram
         private void GetAutoUploadValue()
         {
             String line;
+            this.autoupload = 1;
             try
             {
                 StreamReader sr = new StreamReader("settings.ini");
@@ -693,6 +718,7 @@ namespace TcpClientProgram
 
         private void SetUp()
         {
+            EnsureSettingsFile();
             GetLanguage();
             GetTimerValue();
             GetAddressList();
@@ -771,6 +797,75 @@ namespace TcpClientProgram
             outputBox.Location = new Point(outputBox.Location.X, 90);
             outputBox.Size = new Size(outputBox.Size.Width, outputBox.Size.Height - 30);
             tableLayoutPanel2.Location = new Point(tableLayoutPanel2.Location.X, 57);
+
+            Resize += DesignForm_Resize;
+            DesignForm_Resize(this, EventArgs.Empty);
+        }
+
+        private void DesignForm_Resize(object sender, EventArgs e)
+        {
+            int top = outputBox.Top;
+            int bottomLimit = tableLayoutPanel1.Top - 8;
+            int availableHeight = Math.Max(120, bottomLimit - top);
+            outputBox.Height = availableHeight;
+
+            labelTimer.Top = tableLayoutPanel1.Bottom + 6;
+            labelTimer.Left = outputBox.Left;
+        }
+
+        private void EnsureSettingsFile()
+        {
+            const string settingsPath = "settings.ini";
+            string[] defaultLines = new[]
+            {
+                "client=SR5000",
+                "reader=keyence",
+                "timer=5000",
+                "mail=",
+                "ip=127.0.0.1",
+                "port=9004",
+                "scancount=40",
+                "autoupload=1",
+                "autoconnect=0",
+                "blockcommand=0",
+                "language=en"
+            };
+
+            if (!File.Exists(settingsPath))
+            {
+                File.WriteAllLines(settingsPath, defaultLines);
+                return;
+            }
+
+            string[] current = File.ReadAllLines(settingsPath);
+            bool rewrite = current.Length < defaultLines.Length;
+
+            if (!rewrite)
+            {
+                string[] scanCountParts = current[6].Split('=');
+                if (!current[6].StartsWith("scancount=", StringComparison.OrdinalIgnoreCase) ||
+                    scanCountParts.Length < 2 ||
+                    string.IsNullOrWhiteSpace(scanCountParts[1]))
+                {
+                    current[6] = "scancount=40";
+                }
+
+                current[7] = "autoupload=1";
+                File.WriteAllLines(settingsPath, current);
+                return;
+            }
+
+            var merged = new string[defaultLines.Length];
+            for (int i = 0; i < defaultLines.Length; i++)
+            {
+                merged[i] = i < current.Length && !string.IsNullOrWhiteSpace(current[i])
+                    ? current[i]
+                    : defaultLines[i];
+            }
+
+            merged[6] = "scancount=40";
+            merged[7] = "autoupload=1";
+            File.WriteAllLines(settingsPath, merged);
         }
 
         private void InitializeShelfControls()
