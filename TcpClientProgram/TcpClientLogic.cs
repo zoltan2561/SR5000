@@ -384,8 +384,8 @@ public class TcpClientLogic : IDisposable
 
         try
         {
-            // data = DM (1618...), image = teljes qr_raw (opc,...,dm)
-            const string sql = "INSERT INTO scans (data, qr_raw, polc, processed) VALUES (@data, @image, @shelf, 0)";
+            // data = OPC (qr_raw első eleme), image = teljes qr_raw (opc,...,dm)
+            const string sql = "INSERT INTO `OPC` (data, qr_raw, polc, processed) VALUES (@data, @image, @shelf, 0)";
             using (var cmd = new MySqlCommand(sql, dbConnection))
             {
                 var pData = cmd.Parameters.Add("@data", MySqlDbType.VarChar);
@@ -398,11 +398,12 @@ public class TcpClientLogic : IDisposable
                 {
                     if (row == null) continue;
 
-                    var dm = (row.Code ?? string.Empty).Trim();
-                    if (dm.Length == 0) continue;
+                    var qrRaw = (row.Image ?? string.Empty).Trim();
+                    var opc = ExtractOpcFromQrRaw(qrRaw);
+                    if (opc.Length == 0) continue;
 
-                    pData.Value = dm;
-                    pImg.Value = (row.Image ?? string.Empty);
+                    pData.Value = opc;
+                    pImg.Value = qrRaw;
                     pShelf.Value = (designForm.CurrentShelfCode ?? string.Empty).Trim();
 
                     cmd.ExecuteNonQuery();
@@ -421,6 +422,20 @@ public class TcpClientLogic : IDisposable
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), ex.Message),
                 System.Drawing.Color.Red);
         }
+    }
+
+    private string ExtractOpcFromQrRaw(string qrRaw)
+    {
+        if (string.IsNullOrWhiteSpace(qrRaw)) return string.Empty;
+
+        string trimmed = qrRaw.Trim();
+        int commaIndex = trimmed.IndexOf(',');
+        string firstSegment = commaIndex >= 0 ? trimmed.Substring(0, commaIndex) : trimmed;
+
+        firstSegment = firstSegment.Trim();
+        if (firstSegment.Length < 10) return string.Empty;
+
+        return firstSegment.Substring(0, 10);
     }
 
     // ========= SETTINGS =========
